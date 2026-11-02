@@ -1,0 +1,23 @@
+{
+  "name": "dsh-activity-view",
+  "version": "1.0.0",
+  "description": "DSH Activity View — 按活跃度排列的侧栏会话列表，带项目名，当前活动会话置顶 · Sidebar activity view listing recently active sessions with their workspace, running sessions first",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["deepseek", "harness", "dsh", "dsh-plugin", "activity-view", "sidebar", "sessions"],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "locale", "icon.svg", "README.md", "LICENSE"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["locale", "timer", "sessions", "layout", "uiWorkspace"]
+    }
+  }
+}

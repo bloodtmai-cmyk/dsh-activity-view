@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Activity View",
+    "description": "Adds a sidebar icon that lists recently active sessions together with the workspace each belongs to."
+  }
+}

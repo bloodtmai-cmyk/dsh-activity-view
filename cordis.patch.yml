@@ -1,0 +1,3 @@
+- insert:
+    - id: activity-view
+      name: '@local/activity-view'
