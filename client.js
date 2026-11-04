@@ -395,7 +395,16 @@ button.dshActivityIcon:focus-visible {
             const ids = Array.isArray(state?.ids) ? state.ids : []
             const byId = state?.byId ?? {}
             const projections = state?.projectionsBySession ?? {}
+            // The host list store can carry the same sessionId more than once (a session that
+            // was opened/resumed several times keeps multiple list entries). Dedupe by id so
+            // each session renders exactly one row; first occurrence wins (ids are recency-ordered).
+            const seenIds = new Set()
             const items = ids
+              .filter((id) => {
+                if (typeof id !== 'string' || id === '' || seenIds.has(id)) return false
+                seenIds.add(id)
+                return true
+              })
               .map((id) => byId[id])
               .filter(Boolean)
               .filter((summary) => summary.origin !== 'subagent')
