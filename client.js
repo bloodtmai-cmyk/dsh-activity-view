@@ -395,9 +395,26 @@ button.dshActivityIcon:focus-visible {
             const ids = Array.isArray(state?.ids) ? state.ids : []
             const byId = state?.byId ?? {}
             const projections = state?.projectionsBySession ?? {}
-            // The host list store can carry the same sessionId more than once (a session that
-            // was opened/resumed several times keeps multiple list entries). Dedupe by id so
-            // each session renders exactly one row; first occurrence wins (ids are recency-ordered).
+            // Only top-level sessions belong in an activity list: subagent runs and forked
+            // child sessions reuse their parent's title, so listing them looks like the same
+            // conversation repeated several times. Field names differ across host versions,
+            // so probe every known spelling and fail open (undefined ⇒ not a child).
+            const parentOf = (raw) => {
+              for (const key of ['parentSessionId', 'parentSession', 'parentId', 'parent']) {
+                const value = raw[key]
+                if (typeof value === 'string' && value !== '') return value
+              }
+              return ''
+            }
+            const isChildSession = (raw) => {
+              if (raw.origin === 'subagent') return true
+              if (parentOf(raw) !== '') return true
+              for (const key of ['depth', 'delegationDepth']) {
+                const value = raw[key]
+                if (typeof value === 'number' && value > 0) return true
+              }
+              return false
+            }
             const seenIds = new Set()
             const items = ids
               .filter((id) => {
@@ -407,7 +424,7 @@ button.dshActivityIcon:focus-visible {
               })
               .map((id) => byId[id])
               .filter(Boolean)
-              .filter((summary) => summary.origin !== 'subagent')
+              .filter((raw) => !isChildSession(raw))
               .map((raw) => {
                 // The list store entry is the host's projected display object, NOT a SessionSummary:
                 // { id, displayTitle, title?, projectionValues?, cwd, blank, updatedAt, running, ... }.
@@ -434,6 +451,14 @@ button.dshActivityIcon:focus-visible {
               })
               .filter(Boolean)
               .filter((entry) => entry.id !== '')
+              .filter((entry, index, all) => {
+                // Last safety net: lineage metadata is not always projected onto the list entry,
+                // so also collapse rows that name the same conversation in the same workspace.
+                // Only rows carrying a real title take part, so unlabelled sessions never merge.
+                if (!entry.hasHint) return true
+                const key = `${entry.title}\u0000${entry.workspace}`
+                return all.findIndex((other) => other.hasHint && `${other.title}\u0000${other.workspace}` === key) === index
+              })
               .slice(0, MAX_ROWS)
             store.publish({ status: 'ready', items, diagnostic: '' })
           } catch (error) {
