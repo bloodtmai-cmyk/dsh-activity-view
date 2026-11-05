@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
         yesterday: 'Yesterday',
         earlier: 'Earlier',
         newSession: 'New session',
+        notLocated: 'native list not located',
       },
       zh: {
         panelTitle: '\u6700\u8fd1\u6d3b\u52a8\u7684\u4f1a\u8bdd',
@@ -52,6 +53,7 @@ window.__ModuleLoader__.load({
         yesterday: '\u6628\u5929',
         earlier: '\u66f4\u65e9',
         newSession: '\u65b0\u4f1a\u8bdd',
+        notLocated: '\u672a\u5b9a\u4f4d\u5230\u539f\u751f\u5217\u8868',
       },
     }
 
@@ -627,6 +629,7 @@ button.dshActivityIcon:focus-visible {
                 chosen = { ...chosen, element, rect: parentRect, area: parentRect.width * parentRect.height }
               }
               return {
+                source: 'region',
                 left: chosen.rect.left,
                 top: chosen.rect.top,
                 width: chosen.rect.width,
@@ -640,6 +643,7 @@ button.dshActivityIcon:focus-visible {
           // 兜底：左侧栏里一块带内边距的小面板，绝不覆盖整屏。
           const left = Math.min(120, Math.round(viewportWidth * 0.05) + 56)
           return {
+            source: 'fallback',
             left,
             top: 72,
             width: Math.min(300, Math.max(220, viewportWidth - left - 24)),
@@ -649,85 +653,98 @@ button.dshActivityIcon:focus-visible {
         }
 
         /**
-         * 直接量**一个真实会话行**，用它和它所在的滚动容器反推这一列的确切几何与字体：
-         * 面板的边框盒 = 容器 padding box，行距 = 真实行高，左缩进 = 真实行到容器左边的距离，
-         * 字体/颜色 = 真实行的 computed style。这样不需要猜任何数值，也不会比原生偏右或窄一截。
+         * 结构定位：不依赖"我们的标题正好等于侧栏里显示的文字"（实测从不相等，于是每版都退到
+         * 兜底矩形，看起来永远"还是老样子"）。改成找**左栏里装着一堆行的高容器**：
+         * 宽度像列表、高度像列表、内部有 >=3 个行高 20..56 的子元素，取行数最多的那个。
+         * 找到后再从一个行级子元素采样字体与行高。
          */
-        const measureListBox = () => {
-          try {
-            const titles = (Array.isArray(store.snapshot.items) ? store.snapshot.items : [])
-              .map((entry) => (typeof entry.title === 'string' ? entry.title.trim() : ''))
-              .filter((title) => title.length >= 3)
-              .slice(0, 12)
-            if (titles.length === 0) return null
-            const limit = Math.min(720, Math.max(420, window.innerWidth * 0.45))
-            let row = null
-            for (const element of document.querySelectorAll('button, a, li, [role="button"], div')) {
-              if (overlayEl !== null && (element === overlayEl || element.contains(overlayEl))) continue
-              if (element.children.length > 4) continue
-              const text = (element.textContent || '').replace(/\s+/g, ' ').trim()
-              if (text === '') continue
-              const matched = titles.some((title) => text === title || text.startsWith(title) || title.startsWith(text))
-              if (!matched) continue
-              const rect = element.getBoundingClientRect()
-              if (rect.width < 80 || rect.height < 16 || rect.height > 64) continue
-              if (rect.left > limit || rect.bottom < 0) continue
-              if (row === null || rect.top < row.getBoundingClientRect().top) row = element
-            }
-            if (row === null) return null
-            const rowRect = row.getBoundingClientRect()
-            const rowStyle = window.getComputedStyle(row)
-
-            let box = row.parentElement
-            while (box !== null) {
-              const style = window.getComputedStyle(box)
-              if (/auto|scroll/.test(style.overflowY) || box.scrollHeight > box.clientHeight + 4) break
-              box = box.parentElement
-            }
-            if (box === null || box === document.body || box === document.documentElement) return null
-            const boxStyle = window.getComputedStyle(box)
-            const num = (value) => Number.parseFloat(value) || 0
-            const boxRect = box.getBoundingClientRect()
-            const left = boxRect.left + num(boxStyle.borderLeftWidth)
-            const top = boxRect.top + num(boxStyle.borderTopWidth)
-            const width = boxRect.width - num(boxStyle.borderLeftWidth) - num(boxStyle.borderRightWidth)
-            const height = boxRect.height - num(boxStyle.borderTopWidth) - num(boxStyle.borderBottomWidth)
-            if (width < 150 || height < 120) return null
-            const background = (() => {
-              let cursor = box
-              for (let up = 0; up < 6 && cursor !== null; up += 1) {
-                const colour = window.getComputedStyle(cursor).backgroundColor
-                if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') return colour
-                cursor = cursor.parentElement
+        const findListBox = () => {
+          const viewportWidth = window.innerWidth
+          const viewportHeight = window.innerHeight
+          const rowLike = (rect) => rect.height >= 20 && rect.height <= 56 && rect.width >= 80
+          const countRows = (element) => {
+            let rows = 0
+            let sample = null
+            const visit = (parent, depth) => {
+              for (const child of parent.children) {
+                const rect = child.getBoundingClientRect()
+                if (rowLike(rect)) {
+                  rows += 1
+                  if (sample === null) sample = child
+                } else if (depth < 2 && child.children.length > 0 && rect.height >= 56) {
+                  visit(child, depth + 1)
+                }
+                if (rows > 60) return
               }
-              return ''
-            })()
-            return {
-              left,
-              top,
-              width,
-              height,
-              background,
-              rowHeight: rowRect.height,
-              rowInsetLeft: Math.max(0, rowRect.left - left),
-              font: {
-                family: rowStyle.fontFamily,
-                size: rowStyle.fontSize,
-                weight: rowStyle.fontWeight,
-                lineHeight: rowStyle.lineHeight,
-                color: rowStyle.color,
-                letterSpacing: rowStyle.letterSpacing,
-              },
             }
-          } catch (error) {
-            console.error('[activity-view] measure list box failed', error)
-            return null
+            visit(element, 0)
+            return { rows, sample }
+          }
+
+          let best = null
+          for (const element of document.querySelectorAll('*')) {
+            if (overlayEl !== null && (element === overlayEl || element.contains(overlayEl))) continue
+            if (element === document.body || element === document.documentElement) continue
+            const rect = element.getBoundingClientRect()
+            if (rect.width < 180 || rect.width > 640) continue
+            if (rect.height < 200 || rect.height > viewportHeight * 0.94) continue
+            if (rect.left < 0 || rect.left > Math.min(viewportWidth * 0.5, 720)) continue
+            if (rect.right > viewportWidth * 0.72) continue
+            const style = window.getComputedStyle(element)
+            const scrollable = /auto|scroll/.test(style.overflowY) || element.scrollHeight > element.clientHeight + 8
+            const measured = countRows(element)
+            if (measured.rows < 3) continue
+            const score = measured.rows + (scrollable ? 3 : 0)
+            if (best === null || score > best.score || (score === best.score && rect.height > best.rect.height)) {
+              best = { element, rect, score, sample: measured.sample, scrollable }
+            }
+          }
+          if (best === null) return null
+
+          const boxStyle = window.getComputedStyle(best.element)
+          const num = (value) => Number.parseFloat(value) || 0
+          const left = best.rect.left + num(boxStyle.borderLeftWidth)
+          const top = best.rect.top + num(boxStyle.borderTopWidth)
+          const width = best.rect.width - num(boxStyle.borderLeftWidth) - num(boxStyle.borderRightWidth)
+          const height = best.rect.height - num(boxStyle.borderTopWidth) - num(boxStyle.borderBottomWidth)
+
+          let background = ''
+          let cursor = best.element
+          for (let up = 0; up < 6 && cursor !== null; up += 1) {
+            const colour = window.getComputedStyle(cursor).backgroundColor
+            if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') {
+              background = colour
+              break
+            }
+            cursor = cursor.parentElement
+          }
+
+          const sampleRect = best.sample === null ? null : best.sample.getBoundingClientRect()
+          const fontSource = best.sample === null ? best.element : best.sample
+          const fontStyle = window.getComputedStyle(fontSource)
+          return {
+            source: 'list',
+            left,
+            top,
+            width,
+            height,
+            background,
+            rowHeight: sampleRect === null ? 30 : sampleRect.height,
+            rowInsetLeft: sampleRect === null ? 6 : Math.max(0, sampleRect.left - left),
+            font: {
+              family: fontStyle.fontFamily,
+              size: fontStyle.fontSize,
+              weight: fontStyle.fontWeight,
+              lineHeight: fontStyle.lineHeight,
+              color: fontStyle.color,
+              letterSpacing: fontStyle.letterSpacing,
+            },
           }
         }
 
         const paintOverlay = (host) => {
           const state = store.snapshot
-          if (pinnedRegion === null) pinnedRegion = measureListBox() || findRegion()
+          if (pinnedRegion === null) pinnedRegion = findListBox() || findRegion()
           const region = pinnedRegion
           const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
           const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
@@ -790,6 +807,13 @@ button.dshActivityIcon:focus-visible {
               groups.push(group)
             }
             group.items.push(entry)
+          }
+
+          if (region.source === 'fallback') {
+            const note = document.createElement('div')
+            note.textContent = translate('notLocated')
+            note.style.cssText = 'flex:none;padding:4px 6px 6px;font-size:.75em;opacity:.5;'
+            host.appendChild(note)
           }
 
           for (const group of groups) {
