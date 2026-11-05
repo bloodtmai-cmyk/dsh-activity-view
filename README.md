@@ -7,7 +7,7 @@
 <a id="english"></a>
 ## English
 
-A community UI plugin for DeepSeek Harness, packaged as `@local/activity-view` (rename before publishing). Click the activity-view icon in the sidebar panel list to replace the host session list with a flat list sorted by activity:
+A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Click the activity-view icon in the sidebar panel list to replace the host session list with a flat list sorted by activity:
 
 - **Running first**: sessions with active work are pinned at the top with an animated spinner.
 - **Project name per row**: each row shows the session title plus its workspace (cwd basename); the workspace span is skipped when it duplicates the title.
@@ -16,13 +16,13 @@ A community UI plugin for DeepSeek Harness, packaged as `@local/activity-view` (
 
 ### Install
 
-Install from a local package directory:
+Install straight from this repository through the DSH plugin manager:
 
 ```
-plugin_manager install_bundle /path/to/activity-view
+plugin_manager install_bundle github:bloodtmai-cmyk/dsh-activity-view
 ```
 
-or unpack the tarball (`npm pack`) and point the installer at the extracted directory. Requires a DeepSeek Harness host with client injection support (`locale`, `timer`, `sessions`, `layout`, `uiWorkspace`).
+The repo carries the `dsh-plugin` topic, so it is also picked up by the marketplace index. Requires a DeepSeek Harness host with client injection support (`locale`, `timer`, `sessions`, `layout`, `uiWorkspace`).
 
 ### Structure
 
@@ -44,13 +44,13 @@ or unpack the tarball (`npm pack`) and point the installer at the extracted dire
 
 ### 安装
 
-从本地包目录安装：
+在 DSH 插件管理器里直接用仓库地址安装：
 
 ```
-plugin_manager install_bundle /path/to/activity-view
+plugin_manager install_bundle github:bloodtmai-cmyk/dsh-activity-view
 ```
 
-或先用 `npm pack` 解开 tarball，再指向解压目录。要求宿主支持客户端注入（`locale`、`timer`、`sessions`、`layout`、`uiWorkspace`）。
+仓库带有 `dsh-plugin` 主题，因此也会进入套件市场索引。要求宿主支持客户端注入（`locale`、`timer`、`sessions`、`layout`、`uiWorkspace`）。
 
 ## License
 
