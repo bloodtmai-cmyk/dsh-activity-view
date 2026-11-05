@@ -395,28 +395,65 @@ button.dshActivityIcon:focus-visible {
             const ids = Array.isArray(state?.ids) ? state.ids : []
             const byId = state?.byId ?? {}
             const projections = state?.projectionsBySession ?? {}
-            // Only top-level sessions belong in an activity list: subagent runs and forked
-            // child sessions reuse their parent's title, so listing them looks like the same
-            // conversation repeated several times. Field names differ across host versions,
-            // so probe every known spelling and fail open (undefined ⇒ not a child).
-            const parentOf = (raw) => {
+            // Entries handed to us through `byId` are the host's projected *display* objects and
+            // may drop lineage fields, while the store's own `items` array keeps them. Index that
+            // array so child sessions are still recognisable in that case.
+            const lineage = new Map()
+            for (const item of Array.isArray(state?.items) ? state.items : []) {
+              if (item === null || typeof item !== 'object') continue
+              const key = typeof item.sessionId === 'string' ? item.sessionId : (typeof item.id === 'string' ? item.id : '')
+              if (key !== '') lineage.set(key, item)
+            }
+            const parentOf = (source) => {
               for (const key of ['parentSessionId', 'parentSession', 'parentId', 'parent']) {
-                const value = raw[key]
+                const value = source?.[key]
                 if (typeof value === 'string' && value !== '') return value
               }
               return ''
             }
+            // Only top-level sessions belong in an activity list: subagent runs and forked child
+            // sessions reuse their parent's title, so listing them looks like one conversation
+            // repeated several times. Field names differ across host versions, so probe every
+            // known spelling and fail open when nothing is present.
             const isChildSession = (raw) => {
-              if (raw.origin === 'subagent') return true
-              if (parentOf(raw) !== '') return true
-              for (const key of ['depth', 'delegationDepth']) {
-                const value = raw[key]
-                if (typeof value === 'number' && value > 0) return true
+              const source = lineage.get(typeof raw.id === 'string' ? raw.id : raw.sessionId) ?? {}
+              for (const candidate of [raw, source]) {
+                if (candidate.origin === 'subagent') return true
+                if (parentOf(candidate) !== '') return true
+                for (const key of ['depth', 'delegationDepth']) {
+                  const value = candidate[key]
+                  if (typeof value === 'number' && value > 0) return true
+                }
               }
               return false
             }
+            // Final safety net that needs no lineage at all: collapse rows displaying the same
+            // title inside the same workspace, preferring a running entry. Rows whose title is
+            // only a placeholder (workspace name or id stub) never merge.
+            const foldDuplicates = (entries) => {
+              const chosen = new Map()
+              const order = []
+              for (const entry of entries) {
+                const flat = entry.title.replace(/\s+/g, '')
+                const placeholder = flat === '' || flat === entry.workspace || entry.title === entry.id.slice(0, 8)
+                // Compare a prefix, not the whole title: sibling sessions start from the same
+                // prompt and only diverge far past where the sidebar truncates them.
+                const key = placeholder
+                  ? ` ${entry.id}`
+                  : `${flat.slice(0, 12)} ${entry.workspace}`
+                const previous = chosen.get(key)
+                if (previous === undefined) {
+                  chosen.set(key, entry)
+                  order.push(key)
+                } else if (previous.running !== true && entry.running === true) {
+                  chosen.set(key, entry)
+                }
+              }
+              return order.map((key) => chosen.get(key))
+            }
+
             const seenIds = new Set()
-            const items = ids
+            const collected = ids
               .filter((id) => {
                 if (typeof id !== 'string' || id === '' || seenIds.has(id)) return false
                 seenIds.add(id)
@@ -451,15 +488,7 @@ button.dshActivityIcon:focus-visible {
               })
               .filter(Boolean)
               .filter((entry) => entry.id !== '')
-              .filter((entry, index, all) => {
-                // Last safety net: lineage metadata is not always projected onto the list entry,
-                // so also collapse rows that name the same conversation in the same workspace.
-                // Only rows carrying a real title take part, so unlabelled sessions never merge.
-                if (!entry.hasHint) return true
-                const key = `${entry.title}\u0000${entry.workspace}`
-                return all.findIndex((other) => other.hasHint && `${other.title}\u0000${other.workspace}` === key) === index
-              })
-              .slice(0, MAX_ROWS)
+            const items = foldDuplicates(collected).slice(0, MAX_ROWS)
             store.publish({ status: 'ready', items, diagnostic: '' })
           } catch (error) {
             console.error('[activity-view] session list failed', error)
