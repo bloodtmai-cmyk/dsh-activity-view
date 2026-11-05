@@ -1,13 +1,13 @@
 # DSH Activity View
 
-**DSH 活动视图** — 把 DeepSeek Harness 左侧工作区/会话列表替换为按活跃度排列的活动视图（分组：今天/昨天/更早，行内显示所属工作区，运行中的会话置顶）；侧栏面板列表同时保留活动视图图标，点它可切换「只看运行中」过滤：当前运行中的会话置顶（带动态旋转标记），其余按最近活动时间倒序，每行显示会话标题与所属项目（工作区）名。
+**DSH 活动视图** — 在 DeepSeek Harness 左侧工作区/会话列表的位置显示一个按活跃度排列的活动视图：当前运行中的会话置顶（带动态旋转标记），其余按最近活动时间倒序，每行显示会话标题与所属项目（工作区）名，按今天/昨天/更早分组。点侧栏面板列表里的活动视图图标打开，再点一次（或按 Esc）关闭，关闭后原样露出原生列表。
 
 [English](#english) · [简体中文](#简体中文)
 
 <a id="english"></a>
 ## English
 
-A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Replaces the left workspace/session list with a flat, activity-sorted session list (Today/Yesterday/Earlier, workspace name per row, running sessions pinned on top). The activity-view icon in the sidebar panel list toggles a running-only filter:
+A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Shows a flat, activity-sorted session list (Today/Yesterday/Earlier, workspace name per row, running sessions pinned on top) exactly where the left workspace/session list sits. Click the activity-view icon in the sidebar panel list to open it, click again (or press Esc) to restore the native list:
 
 - **Running first**: sessions with active work are pinned at the top with an animated spinner.
 - **Project name per row**: each row shows the session title plus its workspace (cwd basename); the workspace span is skipped when it duplicates the title.
@@ -27,32 +27,5 @@ The repo carries the `dsh-plugin` topic, so it is also picked up by the marketpl
 ### Structure
 
 - `cordis.patch.yml` — Cordis bundle patch: inserts the plugin row.
-- `sidebar.workspaces` is a `single` slot: the replacement is decided at plugin apply time, so the client module registers its occupant there (a later, runtime registration only leaves an inactive occupant and changes nothing).
-- `client.js` — the entire client half: data loading, sorting, rendering, and document-level click capture (host slots swallow React `onClick`).
-- `index.js` — host half (no host-side work needed).
-- `locale/{en,zh}.json` — localized meta and labels.
-- `icon.svg` — clock glyph using `currentColor`.
-
-<a id="简体中文"></a>
-## 简体中文
-
-面向 DeepSeek Harness 的社区 UI 插件（包名发布前请自行改名）。左侧工作区/会话列表被切换为按活跃度排序的会话扁平列表：
-
-- **活动会话置顶**：正在运行的会话排在最前面，带旋转动画标记。
-- **每行带项目名**：每行显示会话标题与所属项目（工作区目录名）；与标题重复时自动省略。
-- **点击进入会话**：点击某行通过宿主 `uiWorkspace` 服务原地打开该会话，不会新开会话。
-- **动态刷新**：会话列表变化时实时重发布，并按定时器轮询，无需手动刷新。
-
-### 安装
-
-在 DSH 插件管理器里直接用仓库地址安装：
-
-```
-plugin_manager install_bundle github:bloodtmai-cmyk/dsh-activity-view
-```
-
-仓库带有 `dsh-plugin` 主题，因此也会进入套件市场索引。要求宿主支持客户端注入（`locale`、`timer`、`sessions`、`layout`、`uiWorkspace`）。
-
-## License
-
-MIT
+- `sidebar.workspaces` is a `single` slot owned by the shell's own sidebar entry, and the slot catalog states that *declaring is claiming*: a plugin registration — at apply time or at runtime — only leaves an inactive occupant, so the native browser keeps rendering. That is why this plugin does not try to take the slot. Instead it paints a fixed-position panel over the native session-list area (located from the sidebar's New-session button, leaving the native header controls reachable), starts its own scrolling list inside, and removes the panel when toggled off.
+- Because the panel is an overlay rather than a slot occupant, theme changes are handled by copying the native container's background colour on each paint, and window resize/scroll reposition it.
