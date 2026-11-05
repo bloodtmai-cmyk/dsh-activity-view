@@ -196,26 +196,7 @@ button.dshActivityIcon:focus-visible {
   color: var(--dsw-alias-label-primary);
   font-size: 13px;
 }
-.dshActivityView button.dshActivityNewButton {
-  flex: none !important;
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  gap: 6px;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 8px 12px !important;
-  border: 0 !important;
-  border-radius: 8px !important;
-  background: var(--dsw-alias-brand-primary, #4f6bf5) !important;
-  color: #fff !important;
-  font: inherit !important;
-  font-weight: 500;
-  cursor: pointer;
-}
-.dshActivityView button.dshActivityNewButton:hover {
-  filter: brightness(1.08);
-}
+
 .dshActivityGroupTitle {
   padding: 8px 6px 2px !important;
   color: var(--dsw-alias-label-secondary) !important;
@@ -452,11 +433,16 @@ button.dshActivityIcon:focus-visible {
               return order.map((key) => chosen.get(key))
             }
 
+            // 同一会话可能同时以 `session-<uuid>` 与裸 `<uuid>` 两种写法进入列表（子代理目录用的是裸 uuid），
+            // 所以先归一化这个前缀再去重，否则同一会话会被当成两条。
+            const normalizeId = (id) => id.replace(/^session-/, '')
             const seenIds = new Set()
             const collected = ids
               .filter((id) => {
-                if (typeof id !== 'string' || id === '' || seenIds.has(id)) return false
-                seenIds.add(id)
+                if (typeof id !== 'string' || id === '') return false
+                const key = normalizeId(id)
+                if (seenIds.has(key)) return false
+                seenIds.add(key)
                 return true
               })
               .map((id) => byId[id])
@@ -542,7 +528,7 @@ button.dshActivityIcon:focus-visible {
           }
           try {
             const result = ctx.slots.register(
-              { name: 'sidebar.workspaces', id: PANEL_KEY + '-workspaces', priority: -1 },
+              { name: 'sidebar.workspaces', id: PANEL_KEY + '-workspaces', priority: 1000 },
               ActivityWorkspaceList,
             )
             workspaceSlotDispose = result
@@ -551,7 +537,7 @@ button.dshActivityIcon:focus-visible {
             console.error('[activity-view] workspaces register failed', error)
             try {
               const result = ctx.slots.register(
-                { name: 'sidebar.workspaces', key: PANEL_KEY + '-workspaces', priority: -1 },
+                { name: 'sidebar.workspaces', key: PANEL_KEY + '-workspaces', priority: 1000 },
                 ActivityWorkspaceList,
               )
               workspaceSlotDispose = result
@@ -655,7 +641,6 @@ button.dshActivityIcon:focus-visible {
           const todayStart = startOfToday.getTime()
           const yesterdayStart = todayStart - 86400000
           const groups = []
-          let current
           for (const entry of items) {
             const when =
               typeof entry.time === 'number'
@@ -670,22 +655,16 @@ button.dshActivityIcon:focus-visible {
                 : when >= yesterdayStart
                   ? translate('yesterday')
                   : translate('earlier')
-            if (!current || current.label !== label) {
-              current = { label, items: [] }
-              groups.push(current)
+            // 按时段时间可能缺失/非法（sort 会把它们挤到中段），若直接按「标签变化」切组，
+            // 同一个「更早」会被切成两段，界面上就是两个重复的日期标题。改为按标签归并。
+            let group = groups.find((candidate) => candidate.label === label)
+            if (!group) {
+              group = { label, items: [] }
+              groups.push(group)
             }
-            current.items.push(entry)
+            group.items.push(entry)
           }
           return groups
-        }
-
-        const startSession = () => {
-          if (workspaceService === undefined || typeof workspaceService.startSession !== 'function') return
-          try {
-            workspaceService.startSession()
-          } catch (error) {
-            console.error('[activity-view] start session failed', error)
-          }
         }
 
         /**
@@ -713,6 +692,7 @@ button.dshActivityIcon:focus-visible {
             if (ra !== rb) return rb - ra
             return b - a
           })
+
 
           let listBody
           if (snapshot.status === 'unavailable') {
@@ -850,32 +830,6 @@ button.dshActivityIcon:focus-visible {
                 fontSize: '13px',
               },
             },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dshActivityNewButton',
-                onClick: startSession,
-                style: {
-                  flex: 'none',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '6px',
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  padding: '8px 12px',
-                  border: '0',
-                  borderRadius: '8px',
-                  background: 'var(--dsw-alias-brand-primary, #4f6bf5)',
-                  color: '#fff',
-                  font: 'inherit',
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                },
-              },
-              '+ ' + translate('newSession'),
-            ),
             listBody,
           )
         }
