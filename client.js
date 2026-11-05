@@ -550,54 +550,87 @@ button.dshActivityIcon:focus-visible {
         }
 
         /**
-         * Find the native session-list area: the scrollable column that hosts the sidebar's
-         * "New session" button. Returns its viewport rect plus the colour to paint over it, and the
-         * first y where our list may start (just below the native header, so the native
-         * new-session/search controls stay usable).
+         * 找原生「会话列表」那片区域。
+         *
+         * 不猜固定像素：候选 = 位于左栏的容器（宽度/高度像列表），先按**已知会话标题**命中的
+         * 数量分组，命中多的组里取面积最小的那个；没有标题可用时退到「可滚动的左栏容器里
+         * 面积最小」这一个结构特征。两者都失败才用一个只占左栏的小面板兜底。
          */
         const findRegion = () => {
+          const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
+          const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
+          const background = (element) => {
+            let cursor = element
+            for (let up = 0; up < 6 && cursor !== null; up += 1) {
+              const colour = window.getComputedStyle(cursor).backgroundColor
+              if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') return colour
+              cursor = cursor.parentElement
+            }
+            return ''
+          }
           try {
-            const wanted = [MESSAGES.en.newSession, MESSAGES.zh.newSession, translate('newSession')]
-            const nodes = document.querySelectorAll('button, [role="button"], a')
-            for (const node of nodes) {
-              const text = (node.textContent || '').replace(/\s+/g, ' ').trim()
-              const bare = text.replace(/^[+＋]\s*/, '')
-              if (!wanted.includes(text) && !wanted.includes(bare)) continue
-              const own = node.getBoundingClientRect()
-              let parent = node.parentElement
-              for (let depth = 0; depth < 10 && parent !== null; depth += 1) {
-                const rect = parent.getBoundingClientRect()
-                if (rect.height >= 180 && rect.width >= 160 && rect.width <= 640) {
-                  let background = ''
-                  let cursor = parent
-                  for (let up = 0; up < 5 && cursor !== null; up += 1) {
-                    const colour = window.getComputedStyle(cursor).backgroundColor
-                    if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') {
-                      background = colour
-                      break
-                    }
-                    cursor = cursor.parentElement
-                  }
-                  const top = Math.max(rect.top, Math.round(own.bottom) + 6)
-                  return {
-                    left: rect.left,
-                    top,
-                    width: rect.width,
-                    height: Math.max(120, rect.bottom - top),
-                    background,
-                  }
-                }
-                parent = parent.parentElement
+            const titles = (Array.isArray(store.snapshot.items) ? store.snapshot.items : [])
+              .map((entry) => (typeof entry.title === 'string' ? entry.title.trim() : ''))
+              .filter((title) => title.length >= 3)
+              .slice(0, 12)
+            const leftColumnLimit = Math.min(720, Math.max(420, viewportWidth * 0.45))
+            const candidates = []
+            for (const element of document.querySelectorAll('*')) {
+              if (element === overlayEl || (overlayEl !== null && element.contains(overlayEl))) continue
+              const rect = element.getBoundingClientRect()
+              if (rect.width < 150 || rect.width > 640) continue
+              if (rect.height < 180) continue
+              if (rect.left < 0 || rect.left > leftColumnLimit) continue
+              const text = element.textContent || ''
+              let hits = 0
+              for (const title of titles) {
+                if (text.includes(title)) hits += 1
+              }
+              const style = window.getComputedStyle(element)
+              const scrollable =
+                /auto|scroll/.test(style.overflowY) || element.scrollHeight > element.clientHeight + 8
+              candidates.push({ hits, scrollable, area: rect.width * rect.height, element, rect })
+            }
+            const choose = (pool) => {
+              let best = null
+              for (const candidate of pool) {
+                if (best === null || candidate.area < best.area) best = candidate
+              }
+              return best
+            }
+            let chosen = null
+            if (candidates.length > 0) {
+              let topHits = 0
+              for (const candidate of candidates) {
+                if (candidate.hits > topHits) topHits = candidate.hits
+              }
+              if (topHits > 0) {
+                chosen = choose(candidates.filter((candidate) => candidate.hits === topHits))
+              }
+              if (chosen === null) {
+                const scrolling = candidates.filter((candidate) => candidate.scrollable)
+                chosen = choose(scrolling.length > 0 ? scrolling : candidates)
+              }
+            }
+            if (chosen !== null) {
+              return {
+                left: chosen.rect.left,
+                top: chosen.rect.top,
+                width: chosen.rect.width,
+                height: chosen.rect.height,
+                background: background(chosen.element),
               }
             }
           } catch (error) {
-            console.error('[activity-view] locate sidebar region failed', error)
+            console.error('[activity-view] locate sidebar list failed', error)
           }
+          // 兜底：左侧栏里一块带内边距的小面板，绝不覆盖整屏。
+          const left = Math.min(120, Math.round(viewportWidth * 0.05) + 56)
           return {
-            left: 8,
-            top: 56,
-            width: 280,
-            height: Math.max(240, window.innerHeight - 120),
+            left,
+            top: 72,
+            width: Math.min(300, Math.max(220, viewportWidth - left - 24)),
+            height: Math.min(520, Math.max(240, viewportHeight - 160)),
             background: '',
           }
         }
