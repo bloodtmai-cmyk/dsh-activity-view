@@ -493,6 +493,57 @@ button.dshActivityIcon:focus-visible {
           }
         }
 
+        /** 活动视图是否已接管侧栏的工作区/会话列表。 */
+        let activityActive = false
+        let workspaceInject
+        const modeListeners = new Set()
+        const publishMode = (next) => {
+          activityActive = next
+          for (const listener of modeListeners) {
+            try {
+              listener(next)
+            } catch (error) {
+              console.error('[activity-view] mode listener failed', error)
+            }
+          }
+        }
+        const useMode = () => {
+          const [, setTick] = React.useState(0)
+          React.useEffect(() => {
+            const listener = () => setTick((tick) => tick + 1)
+            modeListeners.add(listener)
+            return () => {
+              modeListeners.delete(listener)
+            }
+          }, [])
+          return activityActive
+        }
+
+        /**
+         * 开关活动视图：开＝接管侧栏工作区列表（inject 才能顶掉原生占用者），关＝释放、原生列表回来。
+         */
+        const toggleActivityView = () => {
+          if (workspaceInject) {
+            try {
+              workspaceInject()
+            } catch (error) {
+              console.error('[activity-view] workspaces release failed', error)
+            }
+            workspaceInject = undefined
+            publishMode(false)
+            return
+          }
+          try {
+            const dispose = ctx.slots.inject('sidebar.workspaces', () => {
+              return ctx.slots.register({ name: 'sidebar.workspaces' }, ActivityViewPanel)
+            })
+            workspaceInject = typeof dispose === 'function' ? dispose : undefined
+            publishMode(true)
+          } catch (error) {
+            console.error('[activity-view] workspaces inject failed', error)
+          }
+        }
+
         const useLocaleTick = () => {
           const [, setTick] = React.useState(0)
           React.useEffect(() => {
@@ -513,6 +564,71 @@ button.dshActivityIcon:focus-visible {
             return store.subscribe(setSnapshot)
           }, [])
           return snapshot
+        }
+
+        const ActivityIcon = (props) => {
+          useLocaleTick()
+          const active = useMode()
+          const snapshot = useSnapshot()
+          const busy = Array.isArray(snapshot.items) && snapshot.items.some((entry) => entry.running === true)
+          const label = translate('iconLabel')
+          const edge =
+            props !== null && typeof props === 'object' && typeof props.size === 'number' ? props.size : 16
+          return h(
+            'span',
+            {
+              className: active ? 'dshActivityIcon dshActivityIconActive' : 'dshActivityIcon',
+              role: 'button',
+              tabIndex: 0,
+              'aria-label': label,
+              'aria-pressed': active ? 'true' : 'false',
+              title: label,
+              style: {
+                pointerEvents: 'auto',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                lineHeight: 0,
+                color: active
+                  ? 'var(--dsw-alias-label-primary, #1a1a1a)'
+                  : 'var(--dsw-alias-label-secondary, #666)',
+              },
+              onKeyDown: (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  toggleActivityView()
+                }
+              },
+            },
+            h(
+              'svg',
+              { viewBox: '0 0 24 24', width: edge, height: edge, fill: 'none', 'aria-hidden': 'true', style: { display: 'block' } },
+              h('circle', { cx: 12, cy: 12, r: 8.25, stroke: 'currentColor', strokeWidth: 1.6 }),
+              h(
+                'g',
+                null,
+                busy
+                  ? h('animateTransform', {
+                      attributeName: 'transform',
+                      attributeType: 'XML',
+                      type: 'rotate',
+                      from: '0 12 12',
+                      to: '360 12 12',
+                      dur: '1.6s',
+                      repeatCount: 'indefinite',
+                    })
+                  : null,
+                h('path', {
+                  d: 'M12 7.6V12.1L15 13.9',
+                  stroke: 'currentColor',
+                  strokeWidth: 1.6,
+                  strokeLinecap: 'round',
+                  strokeLinejoin: 'round',
+                }),
+              ),
+              h('circle', { cx: 17.6, cy: 7.2, r: 2.4, fill: 'currentColor', opacity: busy ? 1 : 0.55 }),
+            ),
+          )
         }
 
         /** Group entries into today / yesterday / earlier buckets, preserving recency order. */
@@ -768,12 +884,27 @@ button.dshActivityIcon:focus-visible {
           }, `activity-view:locale:${localeId}`)
         }
 
-        // 侧栏左侧工作区/会话列表整体换成活动视图。single 槽的替换必须走 inject：
-        // inject 声明「这个座位存在」，register 覆盖它的占用者；直接 register 只会多出一个占位，
-        // 原生列表照旧渲染，于是就出现了两份列表叠在一起。
-        ctx.slots.inject('sidebar.workspaces', () => {
-          return ctx.slots.register({ name: 'sidebar.workspaces' }, ActivityViewPanel)
+        ctx.slots.inject('sidebar.panellist', () => {
+          return ctx.slots.register(
+            { name: 'sidebar.panellist', id: PANEL_KEY, order: 20, label: () => translate('iconLabel') },
+            ActivityIcon,
+          )
         })
+
+        // 切回原生列表 / 卸载时释放工作区占位。
+        ctx.effect(
+          () => () => {
+            if (workspaceInject) {
+              try {
+                workspaceInject()
+              } catch (error) {
+                console.error('[activity-view] workspaces release failed', error)
+              }
+              workspaceInject = undefined
+            }
+          },
+          'activity-view:workspaces-cleanup',
+        )
 
         if (timerService !== undefined && typeof timerService.interval === 'function') {
           ctx.effect(() => timerService.interval(() => void load(), POLL_MS), 'activity-view:poll')
