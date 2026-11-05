@@ -795,9 +795,62 @@ button.dshActivityIcon:focus-visible {
               best.rect.height - num(style.borderTopWidth) - num(style.borderBottomWidth),
               height - top - 4,
             )
-            let fill = style.getPropertyValue('--dsw-specific-sidebar-fill').trim()
-            if (fill === '') fill = window.getComputedStyle(document.body).getPropertyValue('--dsw-specific-sidebar-fill').trim()
-            return { source: 'scroller', element: best.element, left, top, width: width2, height: height2, background: fill }
+            // 真实绘制出来的底色：从列表容器往上找第一个不透明的背景色，都没有就用 body 的。
+            const painted = (() => {
+              let cursor = best.element
+              for (let up = 0; up < 8 && cursor !== null; up += 1) {
+                const colour = window.getComputedStyle(cursor).backgroundColor
+                if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') return colour
+                cursor = cursor.parentElement
+              }
+              const bodyColour = window.getComputedStyle(document.body).backgroundColor
+              return bodyColour !== '' && bodyColour !== 'transparent' && bodyColour !== 'rgba(0, 0, 0, 0)' ? bodyColour : '#ffffff'
+            })()
+
+            // 从容器里的真实行与真实"今天/更早"标题采样字体与颜色。
+            let rowStyle = null
+            let groupStyle = null
+            const groupWords = [translate('today'), translate('yesterday'), translate('earlier'), '今天', '昨天', '更早']
+            for (const child of best.element.querySelectorAll('*')) {
+              const rect = child.getBoundingClientRect()
+              if (rect.height < 10) continue
+              const text = (child.textContent || '').trim()
+              if (text === '') continue
+              if (rowStyle === null && rect.height >= 18 && rect.height <= 60 && rect.width >= 80) {
+                const computed = window.getComputedStyle(child)
+                rowStyle = {
+                  fontSize: computed.fontSize,
+                  fontFamily: computed.fontFamily,
+                  color: computed.color,
+                  lineHeight: computed.lineHeight,
+                  paddingLeft: computed.paddingLeft,
+                  height: rect.height,
+                  textLeft: rect.left,
+                }
+              }
+              if (groupStyle === null && groupWords.indexOf(text) >= 0 && child.children.length === 0) {
+                const computed = window.getComputedStyle(child)
+                groupStyle = {
+                  fontSize: computed.fontSize,
+                  color: computed.color,
+                  fontWeight: computed.fontWeight,
+                  letterSpacing: computed.letterSpacing,
+                  textLeft: rect.left,
+                }
+              }
+              if (rowStyle !== null && groupStyle !== null) break
+            }
+            return {
+              source: 'scroller',
+              element: best.element,
+              left,
+              top,
+              width: width2,
+              height: height2,
+              background: painted,
+              rowStyle,
+              groupStyle,
+            }
           } catch (error) {
             console.error('[activity-view] find scroller failed', error)
             return null
@@ -837,6 +890,13 @@ button.dshActivityIcon:focus-visible {
           // 原生行盒相对列表容器内缩 4px（实测 x=4 的容器里行从 x=8 开始），
           // 这里用同样的内缩，行的左右边缘才能和原生对齐。
           view.style.padding = '4px 4px 12px'
+          const rowStyle = region.rowStyle || null
+          const groupStyle = region.groupStyle || null
+          if (rowStyle !== null) {
+            view.style.fontSize = rowStyle.fontSize
+            view.style.fontFamily = rowStyle.fontFamily
+            view.style.color = rowStyle.color
+          }
           host.appendChild(view)
 
           const message = (text) => {
@@ -912,7 +972,7 @@ button.dshActivityIcon:focus-visible {
               row.setAttribute('data-av-session', entry.id)
               row.title = entry.title
               row.style.cssText =
-                'display:flex;align-items:center;gap:7px;width:100%;box-sizing:border-box;padding:6px 8px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:13px;text-align:left;cursor:pointer;line-height:1.35;'
+                'display:flex;align-items:center;gap:7px;width:100%;box-sizing:border-box;padding:6px 8px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;'
               row.addEventListener('mouseenter', () => {
                 row.style.background = 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14))'
               })
