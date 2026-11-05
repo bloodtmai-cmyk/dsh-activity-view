@@ -77,6 +77,28 @@ button.dshActivityIcon:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary);
   outline-offset: 1px;
 }
+.dshActivityHost {
+  position: relative !important;
+  overflow: hidden !important;
+}
+.dshActivityHost > *:not(.dshActivityMount) {
+  visibility: hidden !important;
+}
+.dshActivityMount {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: inherit;
+  font: inherit;
+}
+.dshActivityMountBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .dshActivityPanel {
   display: flex;
   flex-direction: column;
@@ -503,6 +525,9 @@ button.dshActivityIcon:focus-visible {
          */
         let overlayOpen = false
         let overlayEl = null
+        /** 挂进原生列表的容器与挂载点；与浮层互斥。 */
+        let hostEl = null
+        let mountEl = null
         /** 打开时算一次区域，之后只复用；重新测量会和外层视口互相影响，导致面板越缩越小。 */
         let pinnedRegion = null
         const modeListeners = new Set()
@@ -648,6 +673,165 @@ button.dshActivityIcon:focus-visible {
           }
         }
 
+        const sessionTitles = () =>
+          (Array.isArray(store.snapshot.items) ? store.snapshot.items : [])
+            .map((entry) => (typeof entry.title === 'string' ? entry.title.trim() : ''))
+            .filter((title) => title.length >= 3)
+            .slice(0, 12)
+
+        const headerLabels = () => {
+          const labels = [translate('newSession'), MESSAGES.en.newSession, MESSAGES.zh.newSession]
+          return labels.filter((label) => typeof label === 'string' && label !== '')
+        }
+
+        /**
+         * 找**原生会话列表容器本身**，然后把面板挂进它内部。
+         *
+         * 之前是量一个矩形、把独立浮层摆上去，于是必然差一两个像素，还带自己的底色。
+         * 改成挂进容器：四边由容器的 padding box 决定，字体/颜色/底色全部继承侧栏，
+         * 宽度跟着侧栏走，不存在对不齐或"独立白框"的可能。
+         */
+        const findListHost = () => {
+          try {
+            const titles = sessionTitles()
+            if (titles.length === 0) return null
+            const viewportWidth = window.innerWidth
+            const viewportHeight = window.innerHeight
+            const headers = headerLabels()
+            const leftLimit = Math.min(720, Math.max(420, viewportWidth * 0.45))
+            let best = null
+            for (const element of document.querySelectorAll('*')) {
+              if (overlayEl !== null && (element === overlayEl || element.contains(overlayEl))) continue
+              if (element.classList.contains('dshActivityMount')) continue
+              const rect = element.getBoundingClientRect()
+              if (rect.width < 150 || rect.width > 640) continue
+              if (rect.height < 140 || rect.height > viewportHeight * 0.95) continue
+              if (rect.left < 0 || rect.left > leftLimit) continue
+              const text = element.textContent || ''
+              let hits = 0
+              for (const title of titles) {
+                if (text.includes(title)) hits += 1
+              }
+              if (hits === 0) continue
+              let hasHeader = false
+              for (const label of headers) {
+                if (text.includes(label)) {
+                  hasHeader = true
+                  break
+                }
+              }
+              // 带「新会话 / 工作区」标题的容器是整列，盖上去会把头部也吃掉，跳过
+              if (hasHeader) continue
+              const style = window.getComputedStyle(element)
+              const scrollable = /auto|scroll/.test(style.overflowY) || element.scrollHeight > element.clientHeight + 8
+              // 安全阀：只有"可滚动的列表"或"至少命中两个会话标题"的容器才允许被接管，
+              // 免得误藏别的区域。
+              if (!scrollable && hits < Math.min(2, titles.length)) continue
+              const score = hits * 10 + (scrollable ? 6 : 0) - (rect.height > viewportHeight * 0.8 ? 4 : 0)
+              if (best === null || score > best.score) best = { element, score }
+            }
+            return best === null ? null : best.element
+          } catch (error) {
+            console.error('[activity-view] locate session list failed', error)
+            return null
+          }
+        }
+
+        const detachMount = () => {
+          if (mountEl !== null) {
+            mountEl.remove()
+            mountEl = null
+          }
+          if (hostEl !== null) {
+            hostEl.classList.remove('dshActivityHost')
+            hostEl = null
+          }
+        }
+
+        const renderInPlace = () => {
+          const state = store.snapshot
+          const hostStyle = window.getComputedStyle(hostEl)
+          const fontSize = Number.parseFloat(hostStyle.fontSize) || 13
+          const rowHeight = Math.max(24, Math.min(36, Math.round(fontSize * 2.2)))
+          const sidePadding = Math.max(4, Math.min(14, Math.round(Number.parseFloat(hostStyle.paddingLeft) || 8)))
+
+          mountEl.textContent = ''
+          const body = document.createElement('div')
+          body.className = 'dshActivityMountBody'
+          body.style.padding = `4px ${sidePadding}px 10px`
+          mountEl.appendChild(body)
+
+          const message = (text) => {
+            const node = document.createElement('div')
+            node.textContent = text
+            node.style.cssText = `padding:10px ${sidePadding}px;opacity:.75;`
+            return node
+          }
+
+          const items = sortEntries(Array.isArray(state.items) ? state.items : [])
+          if (state.status === 'unavailable') {
+            body.appendChild(message(translate('unavailable')))
+            return
+          }
+          if (items.length === 0) {
+            const key = state.status === 'error' ? 'failed' : state.status === 'ready' ? 'empty' : 'loading'
+            body.appendChild(message(translate(key)))
+            return
+          }
+
+          const groups = []
+          for (const entry of items) {
+            const label = dayLabel(entry.time)
+            let group = groups.find((candidate) => candidate.label === label)
+            if (group === undefined) {
+              group = { label, items: [] }
+              groups.push(group)
+            }
+            group.items.push(entry)
+          }
+
+          for (const group of groups) {
+            const heading = document.createElement('div')
+            heading.textContent = group.label
+            heading.style.cssText =
+              `padding:8px ${sidePadding}px 2px;font-size:.78em;font-weight:500;opacity:.6;`
+            body.appendChild(heading)
+
+            for (const entry of group.items) {
+              const row = document.createElement('button')
+              row.type = 'button'
+              row.setAttribute('data-av-session', entry.id)
+              row.title = entry.title
+              row.style.cssText =
+                `display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;height:${rowHeight}px;padding:0 6px;margin:0;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;`
+              row.addEventListener('mouseenter', () => {
+                row.style.background = 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14))'
+              })
+              row.addEventListener('mouseleave', () => {
+                row.style.background = 'transparent'
+              })
+
+              const dot = document.createElement('span')
+              dot.style.cssText = `flex:none;width:6px;height:6px;border-radius:50%;background:${
+                entry.running === true ? 'var(--dsw-alias-brand-primary, #4f6bf5)' : 'transparent'
+              };`
+              row.appendChild(dot)
+
+              const title = document.createElement('span')
+              title.textContent = entry.title
+              title.style.cssText = 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+              row.appendChild(title)
+
+              const when = document.createElement('span')
+              when.textContent = formatWhen(entry.time)
+              when.style.cssText = 'flex:none;font-size:.82em;opacity:.55;'
+              row.appendChild(when)
+
+              body.appendChild(row)
+            }
+          }
+        }
+
         const paintOverlay = (host) => {
           const state = store.snapshot
           if (pinnedRegion === null) pinnedRegion = findRegion()
@@ -781,6 +965,15 @@ button.dshActivityIcon:focus-visible {
           }
         }
 
+        const teardown = () => {
+          pinnedRegion = null
+          detachMount()
+          if (overlayEl !== null) {
+            overlayEl.remove()
+            overlayEl = null
+          }
+        }
+
         const syncOverlay = () => {
           if (typeof document === 'undefined') return
           try {
@@ -794,53 +987,78 @@ button.dshActivityIcon:focus-visible {
 
         const paintSync = () => {
           if (!overlayOpen) {
-            pinnedRegion = null
-            if (overlayEl !== null) {
-              overlayEl.remove()
-              overlayEl = null
-            }
+            teardown()
             return
           }
-          if (overlayEl === null) {
-            const host = document.createElement('div')
-            host.className = 'dshActivityOverlay'
-            host.setAttribute('role', 'region')
-            host.setAttribute('aria-label', translate('iconLabel'))
-            host.style.cssText = [
-              'position:fixed',
-              'z-index:2147483000',
-              'display:flex',
-              'flex-direction:column',
-              'min-height:0',
-              'border-radius:0',
-              'border:0',
-              'box-shadow:none',
-              'font:inherit',
-              'color:var(--dsw-alias-label-primary, inherit)',
-            ].join(';')
-            host.addEventListener(
+
+          if (hostEl !== null && !hostEl.isConnected) detachMount()
+          if (hostEl === null) hostEl = findListHost()
+
+          // 找不到原生列表时退回到独立浮层，至少不会什么都不显示。
+          if (hostEl === null) {
+            detachMount()
+            if (overlayEl === null) {
+              const host = document.createElement('div')
+              host.className = 'dshActivityOverlay'
+              host.setAttribute('role', 'region')
+              host.setAttribute('aria-label', translate('iconLabel'))
+              host.style.cssText = [
+                'position:fixed',
+                'z-index:2147483000',
+                'display:flex',
+                'flex-direction:column',
+                'min-height:0',
+                'border-radius:0',
+                'border:0',
+                'box-shadow:none',
+              ].join(';')
+              host.addEventListener(
+                'mousedown',
+                (event) => {
+                  const target = event.target instanceof Element ? event.target : null
+                  const row = target !== null ? target.closest('[data-av-session]') : null
+                  if (row === null) return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  openSession(row.getAttribute('data-av-session') || '')
+                },
+                true,
+              )
+              overlayEl = host
+              document.documentElement.appendChild(host)
+            }
+            paintOverlay(overlayEl)
+            return
+          }
+
+          if (overlayEl !== null) {
+            overlayEl.remove()
+            overlayEl = null
+          }
+          if (hostEl.classList.contains('dshActivityHost') === false) {
+            hostEl.classList.add('dshActivityHost')
+          }
+          if (mountEl === null || mountEl.parentElement !== hostEl) {
+            if (mountEl !== null) mountEl.remove()
+            mountEl = document.createElement('div')
+            mountEl.className = 'dshActivityMount'
+            mountEl.setAttribute('role', 'region')
+            mountEl.setAttribute('aria-label', translate('iconLabel'))
+            mountEl.addEventListener(
               'mousedown',
               (event) => {
                 const target = event.target instanceof Element ? event.target : null
                 const row = target !== null ? target.closest('[data-av-session]') : null
-                if (row !== null) {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  openSession(row.getAttribute('data-av-session') || '')
-                  return
-                }
-                if (target !== null && target.closest('[data-av-close]') !== null) {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  setOverlayOpen(false)
-                }
+                if (row === null) return
+                event.preventDefault()
+                event.stopPropagation()
+                openSession(row.getAttribute('data-av-session') || '')
               },
               true,
             )
-            overlayEl = host
-            document.documentElement.appendChild(host)
+            hostEl.appendChild(mountEl)
           }
-          paintOverlay(overlayEl)
+          renderInPlace()
         }
 
         const setOverlayOpen = (next) => {
