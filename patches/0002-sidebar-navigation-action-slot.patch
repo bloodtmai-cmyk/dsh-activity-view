@@ -1,0 +1,32 @@
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -516,8 +516,17 @@
+ 							selectPanel,
+ 							trackEntryClick,
+ 							renderSlot
+-						}, id)), hasEntryActions && (0, react_jsx_runtime.jsx)(PanelMoreMenu, {
++						}, id)), renderSlot("sidebar.navigation.action", {
+ 							wide,
++							classes: {
++								panelRow: SidebarRoot_module_css_default.panelRow,
++								panelActive: SidebarRoot_module_css_default.panelActive,
++								panelGlyph: SidebarRoot_module_css_default.panelGlyph,
++								panelTitle: SidebarRoot_module_css_default.panelTitle,
++								wide: SidebarRoot_module_css_default.wide
++							}
++						}), hasEntryActions && (0, react_jsx_runtime.jsx)(PanelMoreMenu, {
++							wide,
+ 							label: t("panels.more"),
+ 							entries: panels.filter(({ id }) => id !== "plugins").map(({ id, label }) => ({
+ 								id,
+@@ -755,6 +764,10 @@
+ 						kind: "list",
+ 						scope: "root"
+ 					},
++					"sidebar.navigation.action": {
++						kind: "list",
++						scope: "root"
++					},
+ 					"sidebar.workspaces": {
+ 						kind: "single",
+ 						scope: "root"

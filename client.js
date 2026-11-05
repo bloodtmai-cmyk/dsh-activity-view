@@ -1,1548 +1,1053 @@
 /**
  * Client half of the activity-view bundle.
  *
- * Adds one icon to the sidebar panel list. Clicking that icon swaps the sidebar's session
- * browsing region (`sidebar.workspaces`) for an activity list: every session sorted by recency,
- * grouped Today / Yesterday / Earlier, each row showing the workspace name it belongs to
- * (Codex style). Clicking the icon again disposes the replacement so the shipped region returns.
- * Data comes from `sessions.search`; rows open through `uiWorkspace.openSession`.
+ * 定位：宿主插槽的一个渲染者（occupant），不接管任何其他区域。
+ *  - 只在宿主声明的 `sidebar.workspaces.sessions`（single/root）里注册一个列表 occupant；
+ *    不注册时 SlotOutlet 自己回落到原生 FlatList/SessionTree，插件不返回、不复制原生列表。
+ *  - 不向 document 铺覆盖层，不读取/改写宿主 DOM（无 querySelector、无 MutationObserver、
+ *    无 capture 阶段劫持、无 documentElement 属性、无祖先样式下发）。
+ *  - 数据优先使用宿主通过 props 传进来的原生快照（props.sessions.list）与原生过滤集合，
+ *    只有宿主没传时（老宿主 / 单独挂载调试）才退回 `ctx.sessions.list` 的官方快照。
+ *  - 时间只由本组件的分钟级本地时钟推进（不算数据源轮询），跨午夜时分组随之重算。
  */
 window.__ModuleLoader__.load({
-  id: '@local/activity-view',
+  id: 'dsh-activity-view',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
     const NS = 'activityView'
-    const PANEL_KEY = 'activity-view'
-    const POLL_MS = 5000
     const MAX_ROWS = 25
+    /** 宿主列表扩展点（single/root，原生无占用者，active 时用默认 priority 0 即可）。 */
+    const SLOT_KEY = 'sidebar.workspaces.sessions'
+    /**
+     * 开关入口：宿主补丁追加的导航动作行插槽（list/root）。
+     * 位置在 nav.panelList 的原 PanelRows 之后、More 之前，自带 button 语义，
+     * 不 selectPanel、不写 globalPanel、不碰 footer。
+     * props 合同（宿主显式传入）：{ wide, classes: { panelRow, panelActive, panelGlyph, panelTitle } }。
+     */
+    const ENTRY_KEY = 'sidebar.navigation.action'
+    /** register 的 options.id / options.order（宿主渲染顺序：原生行之后、More 之前）。 */
+    const ENTRY_ID = 'activity-view'
+    const ENTRY_ORDER = 20
+
+    /**
+     * 纯数据层（无 DOM / 无 locale / 无 React / 无插槽），供 UI 与 test 共用。
+     *
+     * 数据合同只认官方字段。宿主原生快照 `props.sessions.list` 与
+     * `ctx.sessions.list.getSnapshot()` 同形：{ ids, byId }，byId 每行由
+     * dsh-api-session-controller 的 projectList() 投影而来，字段集合是：
+     * id / displayTitle / running / retainedBy / blank / updatedAt / formatStatus，
+     * 以及可选的 title / cwd / parentId / origin / projectionValues。
+     * updatedAt 即官方活动时间（api-session/activity → handleSessionActivity，与
+     * metadata.lastPromptAt 取 max），不探测 lastPromptAt 这类未经证实的时间字段。
+     */
+    const D = (() => {
+      const toTime = (value) => {
+        if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : undefined
+        if (typeof value === 'string' && value !== '') {
+          const parsed = Date.parse(value)
+          return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+        }
+        return undefined
+      }
+
+      const pick = (value) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : '')
+
+      /** 本地日历日的起点（用 setHours 归零，不用毫秒偏移）。 */
+      const dayStart = (now) => {
+        const date = new Date(now)
+        date.setHours(0, 0, 0, 0)
+        return date.getTime()
+      }
+
+      /**
+       * 昨天的本地日历日起点。
+       *
+       * 必须用 setDate(getDate() - 1)：本地日可能是 23/24/25 小时（夏令时切换），
+       * `today - 86400000` 在春季切换日会落到前天 23:00 / 昨天 01:00，把昨天整组算错。
+       */
+      const yesterdayStart = (now) => {
+        const date = new Date(now)
+        date.setHours(0, 0, 0, 0)
+        date.setDate(date.getDate() - 1)
+        return date.getTime()
+      }
+
+      /** 到下一个整分钟的毫秒数（本地时钟就用它续期，不做数据轮询）。 */
+      const minuteDelay = (now) => {
+        const delay = 60000 - (now % 60000)
+        return delay > 0 ? delay : 60000
+      }
+
+      /** 子代理行不进活动列表：只认官方 origin / parentId。 */
+      const isChildRow = (row) =>
+        row !== null && row !== undefined && (row.origin === 'subagent' || pick(row.parentId) !== '')
+
+      const workspaceOf = (row) => {
+        const cwd = pick(row?.cwd)
+        if (cwd === '') return ''
+        const parts = cwd.split('/').filter(Boolean)
+        return parts.length === 0 ? '' : parts[parts.length - 1]
+      }
+
+      const toEntry = (row) => {
+        const id = pick(row?.id)
+        if (id === '') return undefined
+        const realTitle = pick(row?.title)
+        const display = pick(row?.displayTitle)
+        const workspace = workspaceOf(row)
+        return {
+          id,
+          title: realTitle || display || workspace || id.slice(0, 8),
+          workspace,
+          hasTitleHint: realTitle !== '',
+          blank: row?.blank === true,
+          time: toTime(row?.updatedAt),
+          running: row?.running === true,
+        }
+      }
+
+      const archivedSet = (sessions) =>
+        new Set(
+          Array.isArray(sessions?.archivedSessionIds)
+            ? sessions.archivedSessionIds.filter((id) => typeof id === 'string' && id !== '')
+            : [],
+        )
+
+      /**
+       * 原生置顶集合：`props.sessions.pinnedSessionIds`（宿主 owner 合同字段，
+       * 与 archivedSessionIds 同源）。老宿主没给这个字段时返回空集合，
+       * 活动模式行为与没有置顶功能时完全一致。
+       */
+      const pinnedSet = (sessions) => {
+        const list = sessions?.pinnedSessionIds
+        if (!Array.isArray(list)) return new Set()
+        const set = new Set()
+        for (const id of list) if (typeof id === 'string' && id !== '') set.add(id)
+        return set
+      }
+
+      /**
+       * 置顶顺序：以 owner 的 `sessions.flatSessionIds`（原生有序 id 列表）为准，
+       * 只捞其中被精确置顶的 id；`flatSessionIds` 里没有的置顶项再按
+       * `pinnedSessionIds` 原数组顺序补在后面。全程精确 id 匹配：不去前缀、
+       * 不看 title、不读未经取证的 `row.pinned`。
+       *
+       * 返回 { pinned, rest }：pinned 是置顶行（已按上面顺序），rest 保持传入顺序。
+       */
+      const pinnedOrder = (entries, sessions) => {
+        const pins = pinnedSet(sessions)
+        if (pins.size === 0 || entries.length === 0) return { pinned: [], rest: entries }
+        const byId = new Map()
+        for (const entry of entries) if (!byId.has(entry.id)) byId.set(entry.id, entry)
+        const pinned = []
+        const taken = new Set()
+        const take = (id) => {
+          if (typeof id !== 'string' || !pins.has(id) || taken.has(id)) return
+          const entry = byId.get(id)
+          // 与原生 sectionMembers 一致：归档行不进置顶段，仍留在既有日期组里（灰显）。
+          if (entry === undefined || entry.archived === true) return
+          pinned.push(entry)
+          taken.add(id)
+        }
+        if (Array.isArray(sessions?.flatSessionIds)) for (const id of sessions.flatSessionIds) take(id)
+        for (const id of sessions.pinnedSessionIds) take(id)
+        return { pinned, rest: entries.filter((entry) => !taken.has(entry.id)) }
+      }
+
+      /**
+       * 原生 `mainSessionId(list)`：当前被主视图保留的会话（即 currentBlank）。
+       * 宿主已经在 props.sessions.currentSessionId 里给了就直接用。
+       */
+      const mainSessionId = (snapshot, sessions) => {
+        const explicit = pick(sessions?.currentSessionId)
+        if (explicit !== '') return explicit
+        const byId = snapshot?.byId ?? {}
+        for (const key of Object.keys(byId)) {
+          const row = byId[key]
+          if (row !== undefined && row !== null && (row.retainedBy?.mainView ?? 0) > 0) return pick(row.id)
+        }
+        return undefined
+      }
+
+      /**
+       * 与原生 `sessionVisible(session, current, archived, archivedFilter)` 等价：
+       *  - 子代理行不出现；
+       *  - blank 行只保留 currentBlank（这就是「currentBlank 例外」）；
+       *  - archivedFilter: default → 只看未归档；show → 全看；only → 只看已归档。
+       *
+       * 注意：owner.flatSessionIds / orderedWorkspaces 只做排序，**不按 archivedFilter 过滤**，
+       * 所以本插件必须自己按这条原生规则筛，不能假设那些 id 天生可见。
+       */
+      const sessionVisible = (row, current, archived, filter) => {
+        if (row?.origin === 'subagent') return false
+        if (row?.blank === true && pick(row?.id) !== current) return false
+        const id = pick(row?.id)
+        if (filter === 'show') return true
+        if (filter === 'only') return archived.has(id)
+        return !archived.has(id)
+      }
+
+      /**
+       * 从原生快照取行。
+       *
+       * 去重只按官方 `row.id`：`ids` 里的键只是索引，可能就是带前缀的别名；
+       * 用别名去重会把「别名不同、真实 id 相同」的两项误判成同一个会话。
+       * byId 里查不到对应行时**不**记入 seen —— 否则后面同 id 的有效行会被吞掉。
+       */
+      const collect = (snapshot, sessions) => {
+        const ids = Array.isArray(snapshot?.ids) ? snapshot.ids : []
+        const byId = snapshot?.byId ?? {}
+        const archived = archivedSet(sessions)
+        const current = mainSessionId(snapshot, sessions)
+        const filter = sessions?.archivedFilter ?? 'default'
+        const seen = new Set()
+        const entries = []
+        for (const key of ids) {
+          const row = typeof key === 'string' ? byId[key] : undefined
+          if (row === undefined || row === null) continue
+          if (!sessionVisible(row, current, archived, filter)) continue
+          const entry = toEntry(row)
+          if (entry === undefined) continue
+          if (seen.has(entry.id)) continue
+          seen.add(entry.id)
+          entries.push({ ...entry, archived: archived.has(entry.id) })
+        }
+        return entries
+      }
+
+      /**
+       * 活动模式的固定排序：运行中优先，其次官方 updatedAt 倒序（无时间的排最后），
+       * 同时间用 id 保证稳定。不复刻原生的 workspace / 手动排序——用户一旦切换那些
+       * 原生选项，本插件直接退出活动模式，把列表交回原生。
+       */
+      const sort = (entries) => {
+        const list = entries.slice()
+        list.sort((a, b) => {
+          if (a.running !== b.running) return a.running ? -1 : 1
+          const left = a.time ?? 0
+          const right = b.time ?? 0
+          if (left !== right) return right - left
+          return a.id.localeCompare(b.id)
+        })
+        return list
+      }
+
+      /** 先排序再限量：限量必须发生在全局排序之后，不能对未排序前缀截断。 */
+      const limit = (entries) => (entries.length > MAX_ROWS ? entries.slice(0, MAX_ROWS) : entries)
+
+      const dayKey = (time, now) => {
+        if (time === undefined) return 'earlier'
+        if (time >= dayStart(now)) return 'today'
+        if (time >= yesterdayStart(now)) return 'yesterday'
+        return 'earlier'
+      }
+
+      /**
+       * 活动模式固定「运行优先 + 日期组」：
+       * 运行中的会话一律落在今天（不重写它的官方 time），其余按本地日历日归组。
+       */
+      const bucketOf = (entry, now) => (entry.running ? 'today' : dayKey(entry.time, now))
+
+      /**
+       * 活动模式固定「运行优先 + 日期组」，置顶行额外落在最前面的 `pinned` 组。
+       * `pinned` 组**不画标题**（`header: false`）：顶部直接是置顶行，随后仍是
+       * Today / Yesterday / Earlier，用户已认可的分组布局不变，也不产生空标题高度。
+       */
+      const group = (entries, now, pinned = []) => {
+        const groups = []
+        if (pinned.length > 0) groups.push({ key: 'pinned', header: false, entries: pinned })
+        const index = new Map()
+        for (const entry of entries) {
+          const key = bucketOf(entry, now)
+          let bucket = index.get(key)
+          if (bucket === undefined) {
+            bucket = { key, entries: [] }
+            index.set(key, bucket)
+            groups.push(bucket)
+          }
+          bucket.entries.push(entry)
+        }
+        return groups
+      }
+
+      /** 活动模式接管的是「运行优先 + 日期组」；原生排序/分组选项一改就交回原生。 */
+      const modes = (view) => ({ groupBy: view?.groupBy, orderBy: view?.orderBy })
+
+      /**
+       * 原生菜单改了 groupBy / orderBy 就退出活动模式。
+       * 只读比较、不回写：用户的选择原样保留，原生列表按新选择即时生效。
+       */
+      const shouldLeaveActivityMode = (baseline, next) => {
+        if (baseline === undefined || next === undefined) return false
+        return baseline.groupBy !== next.groupBy || baseline.orderBy !== next.orderBy
+      }
+
+      const ago = (time, now) => {
+        const delta = now - time
+        if (delta < 60000) return { unit: 'now', value: 0 }
+        if (delta < 3600000) return { unit: 'minutes', value: Math.floor(delta / 60000) }
+        if (delta < 86400000) return { unit: 'hours', value: Math.floor(delta / 3600000) }
+        return { unit: 'days', value: Math.floor(delta / 86400000) }
+      }
+
+      const formatWhen = (time, now, t) => {
+        if (time === undefined) return ''
+        const span = ago(time, now)
+        if (span.unit === 'now') return t('now')
+        if (span.unit === 'minutes') return t('minutesAgo', { count: span.value })
+        if (span.unit === 'hours') return t('hoursAgo', { count: span.value })
+        return t('daysAgo', { count: span.value })
+      }
+
+      /**
+       * 单一入口：把宿主 props 收成「已过滤 + 已排序 + 已限量 + 已分组」的视图模型。
+       * 返回 status 让 UI 区分 loading / empty / ready / unavailable。
+       */
+      const view = (props, snapshot, now) => {
+        const sessions = props?.sessions ?? undefined
+        const native = sessions?.list ?? snapshot
+        if (native === undefined || native === null) return { status: 'unavailable', groups: [], entries: [] }
+        if (props?.view?.ready === false) return { status: 'loading', groups: [], entries: [] }
+        // 归档筛选：宿主把它放在 props.view.archivedFilter；老快照兜底才读 sessions 上的同名字段。
+        const archivedFilter = props?.view?.archivedFilter ?? sessions?.archivedFilter
+        const context = sessions === undefined || sessions.archivedFilter === archivedFilter
+          ? (sessions ?? {})
+          : { ...sessions, archivedFilter }
+        const sorted = sort(collect(native, context))
+        // 置顶行提到最前，且**不占** MAX_ROWS 配额：普通行仍取满 MAX_ROWS。
+        const { pinned, rest } = pinnedOrder(sorted, context)
+        const shown = limit(rest)
+        const entries = pinned.concat(shown)
+        const groups = group(shown, now, pinned)
+        return { status: entries.length === 0 ? 'empty' : 'ready', groups, entries }
+      }
+
+      return {
+        toTime,
+        pick,
+        dayStart,
+        yesterdayStart,
+        minuteDelay,
+        isChildRow,
+        workspaceOf,
+        toEntry,
+        mainSessionId,
+        sessionVisible,
+        pinnedSet,
+        pinnedOrder,
+        collect,
+        sort,
+        limit,
+        dayKey,
+        bucketOf,
+        group,
+        modes,
+        shouldLeaveActivityMode,
+        formatWhen,
+        view,
+      }
+    })()
 
     const MESSAGES = {
       en: {
-        panelTitle: 'Recently active sessions',
+        panelTitle: 'Activity',
         iconLabel: 'Activity view',
-        refresh: 'Refresh',
-        loading: 'Loading recent sessions\u2026',
-        empty: 'No recent activity yet.',
-        failed: 'Could not load recent sessions.',
-        unavailable: 'This build exposes no session search.',
-        now: 'just now',
-        minutesAgo: '{n}m ago',
-        hoursAgo: '{n}h ago',
-        daysAgo: '{n}d ago',
+        loading: 'Loading activity…',
+        empty: 'No recent sessions',
+        failed: 'Could not read sessions',
+        unavailable: 'Session list extension point unavailable in this build',
+        now: 'now',
+        minutesAgo: '{count}m',
+        hoursAgo: '{count}h',
+        daysAgo: '{count}d',
         today: 'Today',
         yesterday: 'Yesterday',
         earlier: 'Earlier',
-        newSession: 'New session',
-        notLocated: 'native list not located',
       },
       zh: {
-        panelTitle: '\u6700\u8fd1\u6d3b\u52a8\u7684\u4f1a\u8bdd',
-        iconLabel: '\u6d3b\u52a8\u89c6\u56fe',
-        refresh: '\u5237\u65b0',
-        loading: '\u6b63\u5728\u52a0\u8f7d\u6700\u8fd1\u4f1a\u8bdd\u2026',
-        empty: '\u6682\u65e0\u6700\u8fd1\u6d3b\u52a8\u3002',
-        failed: '\u65e0\u6cd5\u52a0\u8f7d\u6700\u8fd1\u4f1a\u8bdd\u3002',
-        unavailable: '\u5f53\u524d\u7248\u672c\u6ca1\u6709\u63d0\u4f9b\u4f1a\u8bdd\u641c\u7d22\u63a5\u53e3\u3002',
-        now: '\u521a\u521a',
-        minutesAgo: '{n} \u5206\u949f\u524d',
-        hoursAgo: '{n} \u5c0f\u65f6\u524d',
-        daysAgo: '{n} \u5929\u524d',
-        today: '\u4eca\u5929',
-        yesterday: '\u6628\u5929',
-        earlier: '\u66f4\u65e9',
-        newSession: '\u65b0\u4f1a\u8bdd',
-        notLocated: '\u672a\u5b9a\u4f4d\u5230\u539f\u751f\u5217\u8868',
+        panelTitle: '活动',
+        iconLabel: '活动视图',
+        loading: '正在读取活动…',
+        empty: '最近没有会话',
+        failed: '读取会话失败',
+        unavailable: '当前版本没有提供会话列表扩展点',
+        now: '刚刚',
+        minutesAgo: '{count} 分钟前',
+        hoursAgo: '{count} 小时前',
+        daysAgo: '{count} 天前',
+        today: '今天',
+        yesterday: '昨天',
+        earlier: '更早',
       },
     }
 
-    const STYLE = `
-button.dshActivityIcon {
-  pointer-events: auto !important;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease;
-}
-button.dshActivityIcon:hover {
-  background: var(--dsw-alias-bg-layer-2);
-  color: var(--dsw-alias-label-primary);
-}
-button.dshActivityIcon:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 1px;
-}
-.dshActivityPanel {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  box-sizing: border-box;
-  padding: 20px 24px 28px;
-  color: var(--dsw-alias-label-primary);
-  font-size: 13px;
-}
-.dshActivityHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.dshActivityTitle {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-.dshActivityRefresh {
-  padding: 4px 10px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 7px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
-  cursor: pointer;
-}
-.dshActivityRefresh:hover {
-  border-color: var(--dsw-alias-border-l2);
-  color: var(--dsw-alias-label-primary);
-}
-.dshActivityBody {
-  overflow: auto;
-}
-.dshActivityList {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.dshActivityRow {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 9px 12px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.dshActivityRow:hover {
-  background: var(--dsw-alias-bg-layer-2);
-}
-.dshActivityDot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  margin-top: 6px;
-  border-radius: 50%;
-  background: var(--dsw-alias-state-idle-primary);
-}
-.dshActivityText {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.dshActivityRowTitle {
-  font-size: 13px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.dshActivityMeta {
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.dshActivityMessage {
-  padding: 10px 12px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
-}
-.dshActivityDiagnostic {
-  padding: 0 12px 4px;
-  color: var(--dsw-alias-label-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
-  opacity: 0.75;
-  overflow-wrap: anywhere;
-}
-.dshActivityIconActive {
-  background: var(--dsw-alias-bg-layer-2);
-  color: var(--dsw-alias-label-primary);
-}
-.dshActivityView {
-  display: flex !important;
-  flex-direction: column !important;
-  gap: 10px;
-  box-sizing: border-box;
-  height: 100%;
-  padding: 12px 10px 16px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  color: var(--dsw-alias-label-primary);
-  font-size: 13px;
-}
+    const interpolate = (template, params) => {
+      if (typeof template !== 'string') return ''
+      if (params === undefined) return template
+      return template.replace(/\{(\w+)\}/g, (match, name) =>
+        params[name] === undefined ? match : String(params[name]),
+      )
+    }
 
-.dshActivityGroupTitle {
-  padding: 8px 6px 2px !important;
-  color: var(--dsw-alias-label-secondary) !important;
-  font-size: 11px !important;
-  font-weight: 500 !important;
-  letter-spacing: 0.02em;
-  background: transparent !important;
-  border: 0 !important;
-}
-.dshActivityGroupList {
-  display: flex !important;
-  flex-direction: column !important;
-  gap: 1px !important;
-}
-.dshActivityView button.dshActivityWsRow {
-  display: flex !important;
-  align-items: center !important;
-  gap: 7px !important;
-  width: 100% !important;
-  box-sizing: border-box !important;
-  padding: 7px 8px !important;
-  border: 0 !important;
-  border-radius: 8px !important;
-  background: transparent !important;
-  color: inherit !important;
-  font: inherit !important;
-  font-size: 13px !important;
-  text-align: left !important;
-  cursor: pointer !important;
-  line-height: 1.35 !important;
-}
-.dshActivityView button.dshActivityWsRow:hover {
-  background: var(--dsw-alias-bg-layer-2) !important;
-}
-.dshActivityWsTitle {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  overflow: hidden !important;
-  white-space: nowrap !important;
-  text-overflow: ellipsis !important;
-  font-weight: 400 !important;
-}
-.dshActivityWsName {
-  flex: none !important;
-  max-width: 45%;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)) !important;
-  font-size: 11px !important;
-}
-.dshActivityTime {
-  flex: none !important;
-  margin-left: auto !important;
-  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)) !important;
-  font-size: 11px !important;
-}
-.dshActivityDot {
-  flex: none !important;
-  width: 7px !important;
-  height: 7px !important;
-  border-radius: 50% !important;
-  border: 1px solid var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)) !important;
-  background: transparent !important;
-  padding: 0 !important;
-}
-.dshActivitySpin {
-  flex: none !important;
-  width: 12px !important;
-  height: 12px !important;
-  border-radius: 50% !important;
-  border: 2px solid var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)) !important;
-  border-top-color: transparent !important;
-  background: transparent !important;
-  padding: 0 !important;
-  animation: dshActivitySpin 0.8s linear infinite !important;
-}
-@keyframes dshActivitySpin {
-  to { transform: rotate(360deg); }
-}
+    /**
+     * 语言座位：宿主 SlotOutlet 会把绑定到 entry.locale 的 `t` 传进组件 props（标准座位），
+     * 组件优先用它；没有 t 就用注入的 translate；两者都没有才落到自带英文表。
+     * 这里不探测任何未经证实的 locale 字段（language()/getLocale 之类）。
+     */
+    const pickTranslate = (props) => {
+      if (typeof props?.t === 'function') return props.t
+      if (typeof props?.translate === 'function') return props.translate
+      return (key, params) => interpolate(MESSAGES.en[key] ?? key, params)
+    }
+
+    /**
+     * 样式随组件一起渲染（`<style>` 作为组件子节点），不再往 document.head 注入
+     * 全局样式表：没有全局 id，热更新时也不会因为「旧 id 已存在」而提前 return 留下陈旧 CSS。
+     * 行指标全部取宿主自己用的 layout token（`--dsh-sidebar-row-padding` / `--dsh-sidebar-label-gap` /
+     * `--dsh-sidebar-paint-inset` / `--dsh-workspace-indent` / `--dsw-radius-md`），不观测 DOM、不自造数值。
+     *
+     * 滚动：补丁替换掉的是 `listArea` 里那个 `<FlatList>`/`<SessionTree>` 元素本身，而原生
+     * `.list` / `.treeBody` 只存在于**未占位时的 fallback 组件内部**——一旦 override 生效它们并不存在。
+     * 因此本 occupant 的根节点必须自己充当唯一滚动容器，按原生 `.list` 的 token 复刻
+     * （`flex:1; min-height:0; overflow-y:auto`、`--dsh-session-list-scrollbar-offset` /
+     * `--dsh-session-list-scrollbar-width` / `--dsh-session-list-edge-inset`、`scrollbar-gutter:stable`、
+     * 底部 16px 出血），并且不画背景，让 sidebar 背景透上来；内容组与行 `flex:none`，不被压扁。
+     */
+    const STYLE = `
+.avRoot{box-sizing:border-box;display:flex;flex-direction:column;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;margin-left:-4px;margin-right:var(--dsh-session-list-scrollbar-offset,0px);padding-left:4px;padding-right:calc(var(--dsh-session-list-edge-inset,var(--dsh-sidebar-row-padding,12px)) - var(--dsh-session-list-scrollbar-width,0px) - var(--dsh-session-list-scrollbar-offset,0px));padding-bottom:16px;background-color:transparent;color:var(--dsw-alias-label-primary,currentColor);font-size:14px}
+.avRoot>*+*{margin-top:2px}
+.avGroup{display:flex;flex-direction:column;flex:none}
+.avGroup>*+*{margin-top:2px}
+.avGroupTitle{box-sizing:border-box;flex:none;margin-top:4px;padding-inline:var(--dsh-session-list-edge-inset,var(--dsh-sidebar-row-padding,12px));font-size:11px;line-height:16px;font-weight:500;color:var(--dsw-alias-label-tertiary,currentColor)}
+.avRow{box-sizing:border-box;display:flex;flex:none;align-items:center;gap:0;width:100%;height:32px;margin-top:2px;padding:0 8px;padding-inline-start:calc(var(--dsh-sidebar-row-padding,12px) - var(--dsh-sidebar-paint-inset,0px) + var(--dsh-workspace-indent,0px));border-style:solid;border-color:transparent;border-width:0;border-inline-width:var(--dsh-sidebar-paint-inset,0px);border-radius:var(--dsw-radius-md,8px);background-color:transparent;background-clip:padding-box;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.avRow:hover{background-color:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
+.avRow:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,currentColor));outline-offset:-2px}
+.avRowArchived .avTitle{color:var(--dsw-alias-label-caption,currentColor)}
+.avRowArchived .avMeta{color:var(--dsw-alias-label-caption,currentColor)}
+.avRowArchived:hover{background-color:transparent}
+.avLeading{flex:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:20px;line-height:0;color:var(--dsw-alias-label-tertiary,currentColor)}
+.avTitle{flex:1 1 auto;min-width:0;margin:0 6px 0 var(--dsh-sidebar-label-gap,6px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:20px}
+.avMeta{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;max-width:45%;overflow:hidden;color:var(--dsw-alias-label-tertiary,currentColor)}
+.avWorkspace{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:20px}
+.avTime{flex:none;font-size:10px;line-height:16px;font-variant-numeric:tabular-nums}
+.avRowTail{flex:none;display:inline-flex;align-items:center;gap:2px;min-width:0}
+.avNotice{flex:none;padding:10px 12px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,currentColor)}
+/*
+ * 运行中指示器用真实 SVG 圆弧画正圆：正方 viewBox + 等宽高 + flex:none，
+ * 不再用 border 画环（border 的斜接在不同 DPR 下会看成椭圆/缺角）。
+ * 轨道细、弧端圆，颜色仍取 currentColor，尺寸仍占 12×12，leading 座位 16×20 不变。
+ */
+.avSpin{flex:none;width:12px;height:12px;min-width:12px;min-height:12px;display:inline-flex;align-items:center;justify-content:center;line-height:0;animation:avSpin .9s linear infinite;transform-origin:50% 50%}
+@keyframes avSpin{to{transform:rotate(360deg)}}
+.avSpinGlyph{display:block;flex:none;width:12px;height:12px;overflow:visible}
+.avSpinTrack{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;opacity:.3}
+.avSpinArc{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round}
 `
 
-    const activityExports = {
-      inject: ['slots', 'locale', 'timer', 'sessions', 'layout', 'uiWorkspace'],
-      apply(ctx) {
-        try {
-          activityApply(ctx)
-        } catch (error) {
-          console.error('[activity-view] apply failed', error)
-        }
-      },
+    const styleNode = () => h('style', { key: 'av-style' }, STYLE)
+
+    /** 插槽决策：只有宿主真的声明成 single 才注册，别的形状一律告警不动。 */
+    const decideSlot = (spec) => {
+      if (spec === undefined || spec === null) {
+        return { mounted: false, reason: 'undeclared' }
+      }
+      const kind = spec.kind ?? spec.type
+      if (kind === 'single') return { mounted: true, reason: 'declared' }
+      return { mounted: false, reason: `unexpected-kind:${String(kind)}` }
     }
-    function activityApply(ctx) {
-        const localeService = ctx.locale ?? ctx.get?.('locale')
-        const timerService = ctx.timer ?? ctx.get?.('timer')
-        const sessionsService = ctx.sessions ?? ctx.get?.('sessions')
-        const layoutService = ctx.layout ?? ctx.get?.('layout')
-        const workspaceService = ctx.uiWorkspace ?? ctx.get?.('uiWorkspace')
 
-        const bound = (() => {
+    /** 入口插槽决策：宿主必须声明成 list（动作行是一串，不是单占位）。 */
+    const decideEntry = (spec) => {
+      if (spec === undefined || spec === null) {
+        return { mounted: false, reason: 'undeclared' }
+      }
+      const kind = spec.kind ?? spec.type
+      if (kind === 'list') return { mounted: true, reason: 'declared' }
+      return { mounted: false, reason: `unexpected-kind:${String(kind)}` }
+    }
+
+    /** 宿主快照的兜底读取（仅当 props 没带 sessions.list 时用）。 */
+    const createSnapshotReader = (sessionsService) => () => {
+      try {
+        const snapshot = sessionsService?.list?.getSnapshot?.()
+        return snapshot ?? undefined
+      } catch (error) {
+        console.error('[activity-view] session snapshot read failed', error)
+        return undefined
+      }
+    }
+
+    /**
+     * 全局 UI store：只存「开关 + locale 版本 + 活动模式基线」，会话数据一律走 props。
+     *
+     * baseline 存这里而不是组件 useRef：搜索或 rail 收起会让 occupant 临时 unmount，
+     * useRef 会跟着丢，重挂时把改过的原生 groupBy/orderBy 当成新基线，于是「用户改了
+     * 原生分组也不退出活动模式」。基线挂在 store 上就跨临时 unmount 保留，
+     * 打开/关闭活动模式（activation 生命周期）时重置。
+     */
+    const createStore = () => {
+      let snapshot = { open: false, localeEpoch: 0, baseline: null }
+      const listeners = new Set()
+      const publish = (next) => {
+        snapshot = next
+        for (const listener of Array.from(listeners)) {
           try {
-            return localeService?.bind?.(NS)
+            listener()
           } catch (error) {
-            console.error('[activity-view] locale bind failed', error)
-            return undefined
-          }
-        })()
-
-        const readLanguage = () => {
-          try {
-            const snapshot = localeService?.getLocale?.() ?? localeService?.getSnapshot?.()
-            return String(snapshot?.locale ?? snapshot?.id ?? snapshot?.language ?? '')
-          } catch {
-            return ''
+            console.error('[activity-view] store listener failed', error)
           }
         }
-
-        const translate = (key, values) => {
-          let text
-          try {
-            text = bound?.(key)
-          } catch {
-            text = undefined
-          }
-          if (typeof text !== 'string' || text === '' || text === key || text === `${NS}.${key}`) {
-            const table = readLanguage().toLowerCase().startsWith('zh') ? MESSAGES.zh : MESSAGES.en
-            text = table[key] ?? MESSAGES.en[key] ?? key
-          }
-          if (values === undefined) return text
-          return text.replace(/\{(\w+)\}/g, (match, name) => (name in values ? String(values[name]) : match))
-        }
-
-        /** Relative time for the row meta; falls back to nothing when the value is unusable. */
-        const formatWhen = (value) => {
-          if (value === undefined || value === null) return ''
-          const when = typeof value === 'number' ? value : Date.parse(String(value))
-          if (!Number.isFinite(when)) return ''
-          const delta = Date.now() - when
-          if (delta < 60_000) return translate('now')
-          const minutes = Math.floor(delta / 60_000)
-          if (minutes < 60) return translate('minutesAgo', { n: minutes })
-          const hours = Math.floor(minutes / 60)
-          if (hours < 24) return translate('hoursAgo', { n: hours })
-          return translate('daysAgo', { n: Math.floor(hours / 24) })
-        }
-
-        const store = {
-          snapshot: { status: 'idle', items: [], diagnostic: '' },
-          listeners: new Set(),
-          publish(next) {
-            store.snapshot = next
-            for (const listener of store.listeners) {
-              try {
-                listener(next)
-              } catch (error) {
-                console.error('[activity-view] listener failed', error)
-              }
-            }
-          },
-          subscribe(listener) {
-            store.listeners.add(listener)
-            return () => {
-              store.listeners.delete(listener)
-            }
-          },
-        }
-
-        let inFlight
-
-        const load = () => {
-          if (sessionsService === undefined || sessionsService.list === undefined || typeof sessionsService.list.getSnapshot !== 'function') {
-            store.publish({ status: 'unavailable', items: [], diagnostic: '' })
-            return
-          }
-          try {
-            const state = sessionsService.list.getSnapshot()
-            const ids = Array.isArray(state?.ids) ? state.ids : []
-            const byId = state?.byId ?? {}
-            const projections = state?.projectionsBySession ?? {}
-            // Entries handed to us through `byId` are the host's projected *display* objects and
-            // may drop lineage fields, while the store's own `items` array keeps them. Index that
-            // array so child sessions are still recognisable in that case.
-            const lineage = new Map()
-            for (const item of Array.isArray(state?.items) ? state.items : []) {
-              if (item === null || typeof item !== 'object') continue
-              const key = typeof item.sessionId === 'string' ? item.sessionId : (typeof item.id === 'string' ? item.id : '')
-              if (key !== '') lineage.set(key, item)
-            }
-            const parentOf = (source) => {
-              for (const key of ['parentSessionId', 'parentSession', 'parentId', 'parent']) {
-                const value = source?.[key]
-                if (typeof value === 'string' && value !== '') return value
-              }
-              return ''
-            }
-            // Only top-level sessions belong in an activity list: subagent runs and forked child
-            // sessions reuse their parent's title, so listing them looks like one conversation
-            // repeated several times. Field names differ across host versions, so probe every
-            // known spelling and fail open when nothing is present.
-            const isChildSession = (raw) => {
-              const source = lineage.get(typeof raw.id === 'string' ? raw.id : raw.sessionId) ?? {}
-              for (const candidate of [raw, source]) {
-                if (candidate.origin === 'subagent') return true
-                if (parentOf(candidate) !== '') return true
-                for (const key of ['depth', 'delegationDepth']) {
-                  const value = candidate[key]
-                  if (typeof value === 'number' && value > 0) return true
-                }
-              }
-              return false
-            }
-            // Final safety net that needs no lineage at all: collapse rows displaying the same
-            // title inside the same workspace, preferring a running entry. Rows whose title is
-            // only a placeholder (workspace name or id stub) never merge.
-            const foldDuplicates = (entries) => {
-              const chosen = new Map()
-              const order = []
-              for (const entry of entries) {
-                const flat = entry.title.replace(/\s+/g, '')
-                const placeholder = flat === '' || flat === entry.workspace || entry.title === entry.id.slice(0, 8)
-                // Compare a prefix, not the whole title: sibling sessions start from the same
-                // prompt and only diverge far past where the sidebar truncates them.
-                const key = placeholder
-                  ? ` ${entry.id}`
-                  : `${flat.slice(0, 12)} ${entry.workspace}`
-                const previous = chosen.get(key)
-                if (previous === undefined) {
-                  chosen.set(key, entry)
-                  order.push(key)
-                } else if (previous.running !== true && entry.running === true) {
-                  chosen.set(key, entry)
-                }
-              }
-              return order.map((key) => chosen.get(key))
-            }
-
-            // 同一会话可能同时以 `session-<uuid>` 与裸 `<uuid>` 两种写法进入列表（子代理目录用的是裸 uuid），
-            // 所以先归一化这个前缀再去重，否则同一会话会被当成两条。
-            const normalizeId = (id) => id.replace(/^session-/, '')
-            const seenIds = new Set()
-            const collected = ids
-              .filter((id) => {
-                if (typeof id !== 'string' || id === '') return false
-                const key = normalizeId(id)
-                if (seenIds.has(key)) return false
-                seenIds.add(key)
-                return true
-              })
-              .map((id) => byId[id])
-              .filter(Boolean)
-              .filter((raw) => !isChildSession(raw))
-              .map((raw) => {
-                // The list store entry is the host's projected display object, NOT a SessionSummary:
-                // { id, displayTitle, title?, projectionValues?, cwd, blank, updatedAt, running, ... }.
-                // `title`/`projectionValues` are only attached when a real projected title exists;
-                // `displayTitle` is the host's own display derivation (title, else cwd basename).
-                const id = typeof raw.id === 'string' ? raw.id : (typeof raw.sessionId === 'string' ? raw.sessionId : '')
-                if (id === '') return undefined
-                const pick = (value) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : '')
-                const values = raw.projectionValues ?? projections[id]?.values ?? {}
-                const realTitle = pick(raw.title) || pick(values.title)
-                const display = pick(raw.displayTitle)
-                const cwd = typeof raw.cwd === 'string' ? raw.cwd : (typeof values.workingDirectory === 'string' ? values.workingDirectory : '')
-                const workspace = cwd === '' ? '' : (cwd.split('/').filter(Boolean).pop() ?? '')
-                const title = realTitle || display || workspace || id.slice(0, 8)
-                return {
-                  id,
-                  title,
-                  workspace,
-                  hasHint: realTitle !== '',
-                  blank: raw.blank === true,
-                  time: typeof raw.updatedAt === 'number' ? raw.updatedAt : undefined,
-                  running: raw.running === true,
-                }
-              })
-              .filter(Boolean)
-              .filter((entry) => entry.id !== '')
-            const items = foldDuplicates(collected).slice(0, MAX_ROWS)
-            store.publish({ status: 'ready', items, diagnostic: '' })
-          } catch (error) {
-            console.error('[activity-view] session list failed', error)
-            store.publish({ status: 'error', items: store.snapshot.items, diagnostic: store.snapshot.diagnostic })
-          }
-        }
-
-        const openSession = (sessionId) => {
-          if (workspaceService === undefined || typeof workspaceService.openSession !== 'function') {
-            return
-          }
-          try {
-            workspaceService.openSession(sessionId)
-          } catch (error) {
-            console.error('[activity-view] open session failed', error)
-          }
-        }
-
+      }
+      return {
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+        getSnapshot: () => snapshot,
+        isOpen: () => snapshot.open,
+        setOpen: (open) => {
+          if (snapshot.open === open) return
+          // activation 重置：每次开/关都清基线，下一次渲染重新取。
+          publish({ ...snapshot, open, baseline: null })
+        },
+        toggle: () => publish({ ...snapshot, open: !snapshot.open, baseline: null }),
+        bumpLocale: () => publish({ ...snapshot, localeEpoch: snapshot.localeEpoch + 1 }),
         /**
-         * 侧栏活动视图（覆盖式）。
-         *
-         * `sidebar.workspaces` 由 shell 的 sidebar 条目声明——catalog 里写得很清楚：「declaring is
-         * claiming」。插件在 apply 期或运行期的 register 都只会留下一个 active:false 的占用者，
-         * 原生浏览器照旧渲染，界面没有任何变化。所以这里不再和插槽较劲，改为在原生会话列表上方
-         * 铺一块自己的面板：点侧栏图标开，再点关，关掉即原样露出原生列表。
+         * 活动模式基线检查（纯逻辑，不碰宿主）：
+         *  - 未开启：清基线，不动模式；
+         *  - 首次：记录基线，不退出；
+         *  - 之后（含跨 unmount 重挂）：原生分组/排序变了就静默退出活动模式。
+         * 返回 true 表示这次调用把活动模式关掉了。
          */
-        let overlayOpen = false
-        let overlayEl = null
-        /** 打开时算一次区域，之后只复用；重新测量会和外层视口互相影响，导致面板越缩越小。 */
-        let pinnedRegion = null
-        const modeListeners = new Set()
-        const publishMode = (next) => {
-          overlayOpen = next
-          for (const listener of modeListeners) {
-            try {
-              listener(next)
-            } catch (error) {
-              console.error('[activity-view] mode listener failed', error)
-            }
-          }
-        }
-        const useMode = () => {
-          const [, setTick] = React.useState(0)
-          React.useEffect(() => {
-            const listener = () => setTick((tick) => tick + 1)
-            modeListeners.add(listener)
-            return () => {
-              modeListeners.delete(listener)
-            }
-          }, [])
-          return overlayOpen
-        }
-
-        /** Recency order with running sessions pinned on top. */
-        const sortEntries = (entries) =>
-          entries.slice().sort((left, right) => {
-            const a = typeof left.time === 'number' ? left.time : Date.parse(left.time) || 0
-            const b = typeof right.time === 'number' ? right.time : Date.parse(right.time) || 0
-            const ra = left.running === true ? 1 : 0
-            const rb = right.running === true ? 1 : 0
-            if (ra !== rb) return rb - ra
-            return b - a
-          })
-
-        /** Today / Yesterday / Earlier bucket for one timestamp. */
-        const dayLabel = (time) => {
-          const when = typeof time === 'number' ? time : Date.parse(String(time ?? ''))
-          const startOfToday = new Date()
-          startOfToday.setHours(0, 0, 0, 0)
-          const todayStart = startOfToday.getTime()
-          if (!Number.isFinite(when)) return translate('earlier')
-          if (when >= todayStart) return translate('today')
-          if (when >= todayStart - 86400000) return translate('yesterday')
-          return translate('earlier')
-        }
-
-        /**
-         * 找原生「会话列表」那片区域。
-         *
-         * 不猜固定像素：候选 = 位于左栏的容器（宽度/高度像列表），先按**已知会话标题**命中的
-         * 数量分组，命中多的组里取面积最小的那个；没有标题可用时退到「可滚动的左栏容器里
-         * 面积最小」这一个结构特征。两者都失败才用一个只占左栏的小面板兜底。
-         */
-        const findRegion = () => {
-          const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
-          const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
-          const background = (element) => {
-            let cursor = element
-            for (let up = 0; up < 6 && cursor !== null; up += 1) {
-              const colour = window.getComputedStyle(cursor).backgroundColor
-              if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') return colour
-              cursor = cursor.parentElement
-            }
-            return ''
-          }
-          try {
-            const titles = (Array.isArray(store.snapshot.items) ? store.snapshot.items : [])
-              .map((entry) => (typeof entry.title === 'string' ? entry.title.trim() : ''))
-              .filter((title) => title.length >= 3)
-              .slice(0, 12)
-            const leftColumnLimit = Math.min(720, Math.max(420, viewportWidth * 0.45))
-            const candidates = []
-            for (const element of document.querySelectorAll('*')) {
-              if (element === overlayEl || (overlayEl !== null && element.contains(overlayEl))) continue
-              const rect = element.getBoundingClientRect()
-              if (rect.width < 150 || rect.width > 640) continue
-              if (rect.height < 180) continue
-              if (rect.left < 0 || rect.left > leftColumnLimit) continue
-              const text = element.textContent || ''
-              let hits = 0
-              for (const title of titles) {
-                if (text.includes(title)) hits += 1
-              }
-              const style = window.getComputedStyle(element)
-              const scrollable =
-                /auto|scroll/.test(style.overflowY) || element.scrollHeight > element.clientHeight + 8
-              candidates.push({ hits, scrollable, area: rect.width * rect.height, element, rect })
-            }
-            const choose = (pool) => {
-              let best = null
-              for (const candidate of pool) {
-                if (best === null || candidate.area < best.area) best = candidate
-              }
-              return best
-            }
-            let chosen = null
-            if (candidates.length > 0) {
-              let topHits = 0
-              for (const candidate of candidates) {
-                if (candidate.hits > topHits) topHits = candidate.hits
-              }
-              if (topHits > 0) {
-                chosen = choose(candidates.filter((candidate) => candidate.hits === topHits))
-              }
-              if (chosen === null) {
-                const scrolling = candidates.filter((candidate) => candidate.scrollable)
-                chosen = choose(scrolling.length > 0 ? scrolling : candidates)
-              }
-            }
-            if (chosen !== null) {
-              let element = chosen.element
-              for (let up = 0; up < 4; up += 1) {
-                const parent = element.parentElement
-                if (parent === null) break
-                const parentRect = parent.getBoundingClientRect()
-                if (Math.abs(parentRect.height - chosen.rect.height) > 6) break
-                if (parentRect.width > 560) break
-                if (parentRect.width - chosen.rect.width > 56) break
-                element = parent
-                chosen = { ...chosen, element, rect: parentRect, area: parentRect.width * parentRect.height }
-              }
-              return {
-                source: 'region',
-                left: chosen.rect.left,
-                top: chosen.rect.top,
-                width: chosen.rect.width,
-                height: chosen.rect.height,
-                background: background(chosen.element),
-              }
-            }
-          } catch (error) {
-            console.error('[activity-view] locate sidebar list failed', error)
-          }
-          // 兜底：左侧栏里一块带内边距的小面板，绝不覆盖整屏。
-          const left = Math.min(120, Math.round(viewportWidth * 0.05) + 56)
-          return {
-            source: 'fallback',
-            left,
-            top: 72,
-            width: Math.min(300, Math.max(220, viewportWidth - left - 24)),
-            height: Math.min(520, Math.max(240, viewportHeight - 160)),
-            background: '',
-          }
-        }
-
-        /**
-         * 结构定位：不依赖"我们的标题正好等于侧栏里显示的文字"（实测从不相等，于是每版都退到
-         * 兜底矩形，看起来永远"还是老样子"）。改成找**左栏里装着一堆行的高容器**：
-         * 宽度像列表、高度像列表、内部有 >=3 个行高 20..56 的子元素，取行数最多的那个。
-         * 找到后再从一个行级子元素采样字体与行高。
-         */
-        const findListBox = () => {
-          const viewportWidth = window.innerWidth
-          const viewportHeight = window.innerHeight
-          const rowLike = (rect) => rect.height >= 20 && rect.height <= 56 && rect.width >= 80
-          const countRows = (element) => {
-            let rows = 0
-            let sample = null
-            let bottom = element.getBoundingClientRect().top
-            const visit = (parent, depth) => {
-              for (const child of parent.children) {
-                const rect = child.getBoundingClientRect()
-                if (rowLike(rect)) {
-                  rows += 1
-                  if (rect.bottom > bottom) bottom = rect.bottom
-                  if (sample === null) sample = child
-                } else if (depth < 2 && child.children.length > 0 && rect.height >= 56) {
-                  visit(child, depth + 1)
-                }
-                if (rows > 60) return
-              }
-            }
-            visit(element, 0)
-            return { rows, sample, rowsBottom: bottom }
-          }
-
-          let best = null
-          for (const element of document.querySelectorAll('*')) {
-            if (overlayEl !== null && (element === overlayEl || element.contains(overlayEl))) continue
-            if (element === document.body || element === document.documentElement) continue
-            const rect = element.getBoundingClientRect()
-            if (rect.width < 180 || rect.width > 640) continue
-            if (rect.height < 200 || rect.height > viewportHeight * 0.94) continue
-            if (rect.left < 0 || rect.left > Math.min(viewportWidth * 0.5, 720)) continue
-            if (rect.right > viewportWidth * 0.72) continue
-            const style = window.getComputedStyle(element)
-            const scrollable = /auto|scroll/.test(style.overflowY) || element.scrollHeight > element.clientHeight + 8
-            const measured = countRows(element)
-            if (measured.rows < 3) continue
-            const score = measured.rows + (scrollable ? 3 : 0)
-            if (best === null || score > best.score || (score === best.score && rect.height > best.rect.height)) {
-              best = { element, rect, score, sample: measured.sample, scrollable, rowsBottom: measured.rowsBottom }
-            }
-          }
-          if (best === null) return null
-
-          const boxStyle = window.getComputedStyle(best.element)
-          const num = (value) => Number.parseFloat(value) || 0
-          const left = best.rect.left + num(boxStyle.borderLeftWidth)
-          const top = best.rect.top + num(boxStyle.borderTopWidth)
-          const width = best.rect.width - num(boxStyle.borderLeftWidth) - num(boxStyle.borderRightWidth)
-          const fullHeight = best.rect.height - num(boxStyle.borderTopWidth) - num(boxStyle.borderBottomWidth)
-          // 只覆盖到最后一行的下沿：容器本身可能还包含下面的别的区块（例如远程控制），
-          // 直接用容器高度会盖过去。
-          const height = Math.max(160, Math.min(fullHeight, best.rowsBottom - top + 8))
-
-          let background = ''
-          let cursor = best.element
-          for (let up = 0; up < 6 && cursor !== null; up += 1) {
-            const colour = window.getComputedStyle(cursor).backgroundColor
-            if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') {
-              background = colour
-              break
-            }
-            cursor = cursor.parentElement
-          }
-
-          const sampleRect = best.sample === null ? null : best.sample.getBoundingClientRect()
-          const fontSource = best.sample === null ? best.element : best.sample
-          const fontStyle = window.getComputedStyle(fontSource)
-          return {
-            source: 'list',
-            element: best.element,
-            left,
-            top,
-            width,
-            height,
-            background,
-            rowHeight: sampleRect === null ? 30 : sampleRect.height,
-            rowInsetLeft: sampleRect === null ? 6 : Math.max(0, sampleRect.left - left),
-            font: {
-              family: fontStyle.fontFamily,
-              size: fontStyle.fontSize,
-              weight: fontStyle.fontWeight,
-              lineHeight: fontStyle.lineHeight,
-              color: fontStyle.color,
-              letterSpacing: fontStyle.letterSpacing,
-            },
-          }
-        }
-
-        /**
-         * 找**真正在滚动的那个列表容器**：scrollHeight 明显大于 clientHeight，且含有成排的行。
-         * 它的边框盒就是原生列表的可视区，用它当面板矩形，下边界天然等于原生列表下边界，
-         * 不会再盖住侧栏底部的其它区块。
-         */
-        const findListScroller = () => {
-          try {
-            const rowLike = (rect) => rect.height >= 18 && rect.height <= 60 && rect.width >= 80
-            const countRows = (element) => {
-              let rows = 0
-              for (const child of element.children) {
-                const rect = child.getBoundingClientRect()
-                if (rowLike(rect)) rows += 1
-                else if (child.children.length > 0) {
-                  for (const grand of child.children) {
-                    if (rowLike(grand.getBoundingClientRect())) rows += 1
-                  }
-                }
-              }
-              return rows
-            }
-            const width = typeof window === 'undefined' ? 1024 : window.innerWidth
-            const height = typeof window === 'undefined' ? 768 : window.innerHeight
-            let best = null
-            for (const element of document.querySelectorAll('*')) {
-              if (overlayEl !== null && (element === overlayEl || element.contains(overlayEl))) continue
-              if (element === document.body || element === document.documentElement) continue
-              const rect = element.getBoundingClientRect()
-              if (rect.width < 150 || rect.width > 720) continue
-              if (rect.height < 200 || rect.height > height * 1.2) continue
-              if (rect.left < 0 || rect.left > 48) continue
-              const overflowY = element.scrollHeight - element.clientHeight
-              if (overflowY < 20) continue
-              if (countRows(element) < 3) continue
-              const area = rect.width * rect.height
-              if (best === null || area < best.area) best = { element, rect, area }
-            }
-            if (best === null) return null
-            const style = window.getComputedStyle(best.element)
-            const num = (value) => Number.parseFloat(value) || 0
-            const left = best.rect.left + num(style.borderLeftWidth)
-            const top = best.rect.top + num(style.borderTopWidth)
-            const width2 = best.rect.width - num(style.borderLeftWidth) - num(style.borderRightWidth)
-            const height2 = Math.min(
-              best.rect.height - num(style.borderTopWidth) - num(style.borderBottomWidth),
-              height - top - 4,
-            )
-            // 真实绘制出来的底色：从列表容器往上找第一个不透明的背景色，都没有就用 body 的。
-            const painted = (() => {
-              let cursor = best.element
-              for (let up = 0; up < 8 && cursor !== null; up += 1) {
-                const colour = window.getComputedStyle(cursor).backgroundColor
-                if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') return colour
-                cursor = cursor.parentElement
-              }
-              const bodyColour = window.getComputedStyle(document.body).backgroundColor
-              return bodyColour !== '' && bodyColour !== 'transparent' && bodyColour !== 'rgba(0, 0, 0, 0)' ? bodyColour : '#ffffff'
-            })()
-
-            // 从容器里的真实行与真实"今天/更早"标题采样字体与颜色。
-            let rowStyle = null
-            let groupStyle = null
-            const groupWords = [translate('today'), translate('yesterday'), translate('earlier'), '今天', '昨天', '更早']
-            for (const child of best.element.querySelectorAll('*')) {
-              const rect = child.getBoundingClientRect()
-              if (rect.height < 10) continue
-              const text = (child.textContent || '').trim()
-              if (text === '') continue
-              if (rowStyle === null && rect.height >= 18 && rect.height <= 60 && rect.width >= 80) {
-                const computed = window.getComputedStyle(child)
-                rowStyle = {
-                  fontSize: computed.fontSize,
-                  fontFamily: computed.fontFamily,
-                  color: computed.color,
-                  lineHeight: computed.lineHeight,
-                  paddingLeft: computed.paddingLeft,
-                  height: rect.height,
-                  textLeft: rect.left,
-                }
-              }
-              if (groupStyle === null && groupWords.indexOf(text) >= 0 && child.children.length === 0) {
-                const computed = window.getComputedStyle(child)
-                groupStyle = {
-                  fontSize: computed.fontSize,
-                  color: computed.color,
-                  fontWeight: computed.fontWeight,
-                  letterSpacing: computed.letterSpacing,
-                  textLeft: rect.left,
-                }
-              }
-              if (rowStyle !== null && groupStyle !== null) break
-            }
-            return {
-              source: 'scroller',
-              element: best.element,
-              left,
-              top,
-              width: width2,
-              height: height2,
-              background: painted,
-              rowStyle,
-              groupStyle,
-            }
-          } catch (error) {
-            console.error('[activity-view] find scroller failed', error)
-            return null
-          }
-        }
-
-        const paintOverlay = (host) => {
-          const state = store.snapshot
-          if (pinnedRegion === null) pinnedRegion = findListScroller() || findListBox() || findRegion()
-          const region = pinnedRegion
-          const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
-          const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
-          const width = Math.max(180, Math.min(Math.round(region.width) || 0, Math.max(240, viewportWidth - 32)))
-          const height = Math.max(160, Math.min(Math.round(region.height) || 0, Math.max(200, viewportHeight - 32)))
-          const left = Math.max(0, Math.min(Math.round(region.left) || 0, viewportWidth - width - 8))
-          const top = Math.max(0, Math.min(Math.round(region.top) || 0, viewportHeight - height - 8))
-          host.style.left = `${left}px`
-          host.style.top = `${top}px`
-          host.style.width = `${width}px`
-          host.style.height = `${height}px`
-          // 底色只认侧栏专用填充色：采样的祖先色会把 body 的底色带进来，正是"白框"的来源。
-          let fill = typeof region.background === 'string' ? region.background : ''
-          if (fill === '') {
-            fill = window.getComputedStyle(document.body).getPropertyValue('--dsw-specific-sidebar-fill').trim()
-          }
-          host.style.background = fill !== '' ? fill : '#f9fafb'
-          host.style.color = 'var(--dsw-alias-label-primary, inherit)'
-          host.textContent = ''
-
-          // 与第一版完全相同的容器与行结构：dshActivityView / dshActivityGroupTitle / dshActivityWsRow
-          const view = document.createElement('div')
-          view.className = 'dshActivityView'
-          view.style.height = '100%'
-          view.style.overflowY = 'auto'
-          view.style.overflowX = 'hidden'
-          view.style.overscrollBehavior = 'contain'
-          // 原生行盒相对列表容器内缩 4px（实测 x=4 的容器里行从 x=8 开始），
-          // 这里用同样的内缩，行的左右边缘才能和原生对齐。
-          view.style.padding = '4px 4px 12px'
-          const rowStyle = region.rowStyle || null
-          const groupStyle = region.groupStyle || null
-          if (rowStyle !== null) {
-            view.style.fontSize = rowStyle.fontSize
-            view.style.fontFamily = rowStyle.fontFamily
-            view.style.color = rowStyle.color
-          }
-          host.appendChild(view)
-
-          const message = (text) => {
-            const node = document.createElement('div')
-            node.className = 'dshActivityMessage'
-            node.textContent = text
-            view.appendChild(node)
-          }
-
-          const items = sortEntries(Array.isArray(state.items) ? state.items : [])
-          if (state.status === 'unavailable') {
-            message(translate('unavailable'))
-            return
-          }
-          if (items.length === 0) {
-            const key = state.status === 'error' ? 'failed' : state.status === 'ready' ? 'empty' : 'loading'
-            message(translate(key))
-            return
-          }
-
-          const spinner = () => {
-            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-            svg.setAttribute('class', 'dshActivitySpin')
-            svg.setAttribute('viewBox', '0 0 24 24')
-            svg.setAttribute('width', '12')
-            svg.setAttribute('height', '12')
-            svg.setAttribute('fill', 'none')
-            svg.setAttribute('aria-hidden', 'true')
-            svg.style.cssText = 'flex:none;display:block;'
-            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
-            circle.setAttribute('cx', '12')
-            circle.setAttribute('cy', '12')
-            circle.setAttribute('r', '9')
-            circle.setAttribute('stroke', 'currentColor')
-            circle.setAttribute('stroke-width', '3')
-            circle.setAttribute('stroke-opacity', '0.25')
-            const arc = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-            arc.setAttribute('d', 'M12 3a9 9 0 0 1 9 9')
-            arc.setAttribute('stroke', 'currentColor')
-            arc.setAttribute('stroke-width', '3')
-            arc.setAttribute('stroke-linecap', 'round')
-            const spin = document.createElementNS('http://www.w3.org/2000/svg', 'animateTransform')
-            spin.setAttribute('attributeName', 'transform')
-            spin.setAttribute('attributeType', 'XML')
-            spin.setAttribute('type', 'rotate')
-            spin.setAttribute('from', '0 12 12')
-            spin.setAttribute('to', '360 12 12')
-            spin.setAttribute('dur', '1s')
-            spin.setAttribute('repeatCount', 'indefinite')
-            arc.appendChild(spin)
-            svg.appendChild(circle)
-            svg.appendChild(arc)
-            return svg
-          }
-
-          const groups = groupByDay(items)
-          for (const group of groups) {
-            const block = document.createElement('div')
-            view.appendChild(block)
-
-            const heading = document.createElement('div')
-            heading.className = 'dshActivityGroupTitle'
-            heading.textContent = group.label
-            block.appendChild(heading)
-
-            const list = document.createElement('div')
-            block.appendChild(list)
-
-            for (const entry of group.items) {
-              const row = document.createElement('button')
-              row.type = 'button'
-              row.className = 'dshActivityWsRow'
-              row.setAttribute('data-av-session', entry.id)
-              row.title = entry.title
-              row.style.cssText =
-                'display:flex;align-items:center;gap:7px;width:100%;box-sizing:border-box;padding:6px 8px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;'
-              row.addEventListener('mouseenter', () => {
-                row.style.background = 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14))'
-              })
-              row.addEventListener('mouseleave', () => {
-                row.style.background = 'transparent'
-              })
-
-              const lead = document.createElement('span')
-              lead.style.cssText = 'flex:none;width:12px;height:12px;display:inline-flex;align-items:center;justify-content:center;'
-              if (entry.running === true) lead.appendChild(spinner())
-              row.appendChild(lead)
-
-              const title = document.createElement('span')
-              title.className = 'dshActivityWsTitle'
-              title.textContent = entry.title
-              title.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;'
-              row.appendChild(title)
-
-              if (entry.workspace !== '' && entry.workspace !== entry.title) {
-                const workspace = document.createElement('span')
-                workspace.className = 'dshActivityWsName'
-                workspace.textContent = entry.workspace
-                workspace.style.cssText =
-                  'flex:none;max-width:45%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary, #999);font-size:11px;'
-                row.appendChild(workspace)
-              }
-
-              const when = document.createElement('span')
-              when.className = 'dshActivityTime'
-              when.textContent = formatWhen(entry.time)
-              when.style.cssText =
-                'flex:none;margin-left:auto;color:var(--dsw-alias-label-secondary, #999);font-size:11px;'
-              row.appendChild(when)
-
-              list.appendChild(row)
-            }
-          }
-
-          if (region.source === 'fallback') {
-            const note = document.createElement('div')
-            note.className = 'dshActivityDiagnostic'
-            note.textContent = translate('notLocated')
-            view.appendChild(note)
-          }
-        }
-
-        /** 可见的失败提示：宁可打扰一次，也不要静默什么都不发生。 */
-        const toastFailure = (error) => {
-          try {
-            const box = document.createElement('div')
-            box.textContent = `[activity-view] ${error instanceof Error ? error.message : String(error)}`
-            box.style.cssText = [
-              'position:fixed',
-              'left:12px',
-              'bottom:12px',
-              'z-index:2147483647',
-              'max-width:70vw',
-              'padding:8px 10px',
-              'border-radius:8px',
-              'background:#7f1d1d',
-              'color:#fff',
-              'font:12px/1.4 ui-sans-serif,system-ui,sans-serif',
-              'white-space:pre-wrap',
-              'box-shadow:0 8px 24px rgba(0,0,0,.3)',
-            ].join(';')
-            document.documentElement.appendChild(box)
-            window.setTimeout(() => box.remove(), 12000)
-          } catch {
-            // 连提示都放不进去时只能留在控制台
-          }
-        }
-
-        const syncOverlay = () => {
-          if (typeof document === 'undefined') return
-          try {
-            paintSync()
-            document.documentElement.setAttribute('data-activity-view', overlayOpen ? 'open' : 'closed')
-          } catch (error) {
-            console.error('[activity-view] overlay failed', error)
-            toastFailure(error)
-          }
-        }
-
-        const paintSync = () => {
-          if (!overlayOpen) {
-            pinnedRegion = null
-            if (overlayEl !== null) {
-              overlayEl.remove()
-              overlayEl = null
-            }
-            return
-          }
-          if (overlayEl === null) {
-            const host = document.createElement('div')
-            host.className = 'dshActivityOverlay'
-            host.setAttribute('role', 'region')
-            host.setAttribute('aria-label', translate('iconLabel'))
-            host.style.cssText = [
-              'position:fixed',
-              'z-index:2147483000',
-              'display:flex',
-              'flex-direction:column',
-              'min-height:0',
-              'overflow:hidden',
-              'border-radius:0',
-              'border:0',
-              'box-shadow:none',
-              'font:inherit',
-              'color:var(--dsw-alias-label-primary, inherit)',
-            ].join(';')
-            host.addEventListener(
-              'mousedown',
-              (event) => {
-                const target = event.target instanceof Element ? event.target : null
-                const row = target !== null ? target.closest('[data-av-session]') : null
-                if (row !== null) {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  openSession(row.getAttribute('data-av-session') || '')
-                  return
-                }
-                if (target !== null && target.closest('[data-av-close]') !== null) {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  setOverlayOpen(false)
-                }
-              },
-              true,
-            )
-            overlayEl = host
-            document.documentElement.appendChild(host)
-          }
-          paintOverlay(overlayEl)
-        }
-
-        const setOverlayOpen = (next) => {
-          publishMode(next === true)
-          syncOverlay()
-        }
-
-        const toggleActivityView = () => {
-          setOverlayOpen(!overlayOpen)
-        }
-
-        const useLocaleTick = () => {
-          const [, setTick] = React.useState(0)
-          React.useEffect(() => {
-            let dispose
-            try {
-              dispose = localeService?.subscribe?.(() => setTick((tick) => tick + 1))
-            } catch {
-              dispose = undefined
-            }
-            return typeof dispose === 'function' ? dispose : undefined
-          }, [])
-        }
-
-        const useSnapshot = () => {
-          const [snapshot, setSnapshot] = React.useState(store.snapshot)
-          React.useEffect(() => {
-            setSnapshot(store.snapshot)
-            return store.subscribe(setSnapshot)
-          }, [])
-          return snapshot
-        }
-
-        const ActivityIcon = (props) => {
-          useLocaleTick()
-          const active = useMode()
-          const snapshot = useSnapshot()
-          const busy = Array.isArray(snapshot.items) && snapshot.items.some((entry) => entry.running === true)
-          const label = translate('iconLabel')
-          const edge =
-            props !== null && typeof props === 'object' && typeof props.size === 'number' ? props.size : 16
-          return h(
-            'span',
-            {
-              className: active ? 'dshActivityIcon dshActivityIconActive' : 'dshActivityIcon',
-              role: 'button',
-              tabIndex: 0,
-              'aria-label': label,
-              'aria-pressed': active ? 'true' : 'false',
-              title: label,
-              style: {
-                pointerEvents: 'auto',
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                lineHeight: 0,
-                color: active
-                  ? 'var(--dsw-alias-label-primary, #1a1a1a)'
-                  : 'var(--dsw-alias-label-secondary, #666)',
-              },
-              onClick: () => toggleActivityView(),
-              onKeyDown: (event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  toggleActivityView()
-                }
-              },
-            },
-            h(
-              'svg',
-              { viewBox: '0 0 24 24', width: edge, height: edge, fill: 'none', 'aria-hidden': 'true', style: { display: 'block' } },
-              h('circle', { cx: 12, cy: 12, r: 8.25, stroke: 'currentColor', strokeWidth: 1.6 }),
-              h(
-                'g',
-                null,
-                busy
-                  ? h('animateTransform', {
-                      attributeName: 'transform',
-                      attributeType: 'XML',
-                      type: 'rotate',
-                      from: '0 12 12',
-                      to: '360 12 12',
-                      dur: '1.6s',
-                      repeatCount: 'indefinite',
-                    })
-                  : null,
-                h('path', {
-                  d: 'M12 7.6V12.1L15 13.9',
-                  stroke: 'currentColor',
-                  strokeWidth: 1.6,
-                  strokeLinecap: 'round',
-                  strokeLinejoin: 'round',
-                }),
-              ),
-              h('circle', { cx: 17.6, cy: 7.2, r: 2.4, fill: 'currentColor', opacity: busy ? 1 : 0.55 }),
-            ),
-          )
-        }
-
-        /** Group entries into today / yesterday / earlier buckets, preserving recency order. */
-        const groupByDay = (items) => {
-          const startOfToday = new Date()
-          startOfToday.setHours(0, 0, 0, 0)
-          const todayStart = startOfToday.getTime()
-          const yesterdayStart = todayStart - 86400000
-          const groups = []
-          for (const entry of items) {
-            const when =
-              typeof entry.time === 'number'
-                ? entry.time
-                : typeof entry.time === 'string'
-                  ? Date.parse(entry.time)
-                  : NaN
-            const label = !Number.isFinite(when)
-              ? translate('earlier')
-              : when >= todayStart
-                ? translate('today')
-                : when >= yesterdayStart
-                  ? translate('yesterday')
-                  : translate('earlier')
-            // 按时段时间可能缺失/非法（sort 会把它们挤到中段），若直接按「标签变化」切组，
-            // 同一个「更早」会被切成两段，界面上就是两个重复的日期标题。改为按标签归并。
-            let group = groups.find((candidate) => candidate.label === label)
-            if (!group) {
-              group = { label, items: [] }
-              groups.push(group)
-            }
-            group.items.push(entry)
-          }
-          return groups
-        }
-
-        /**
-         * The activity view: it replaces the sidebar session/workspace browsing region. Sessions are
-         * sorted by recency, grouped Today/Yesterday/Earlier, each row showing its workspace name.
-         */
-        const ActivityViewPanel = () => {
-          useLocaleTick()
-          const snapshot = useSnapshot()
-
-          React.useEffect(() => {
-            load()
-            if (sessionsService !== undefined && sessionsService.list !== undefined && typeof sessionsService.list.subscribe === 'function') {
-              return sessionsService.list.subscribe(() => load())
-            }
-          }, [])
-
-          const runningOnlyOn = useMode()
-          const all = snapshot.items.slice().sort((left, right) => {
-            const a = typeof left.time === 'number' ? left.time : Date.parse(left.time) || 0
-            const b = typeof right.time === 'number' ? right.time : Date.parse(right.time) || 0
-            // Running sessions first (the "current active" ones), then most recent first.
-            const ra = left.running === true ? 1 : 0
-            const rb = right.running === true ? 1 : 0
-            if (ra !== rb) return rb - ra
-            return b - a
-          })
-          const items = runningOnlyOn ? all.filter((entry) => entry.running === true) : all
-
-
-          let listBody
-          if (snapshot.status === 'unavailable') {
-            listBody = h('div', { className: 'dshActivityMessage' }, translate('unavailable'))
-          } else if (items.length === 0) {
-            const key =
-              snapshot.status === 'error' ? 'failed' : snapshot.status === 'ready' ? 'empty' : 'loading'
-            listBody = h('div', { className: 'dshActivityMessage' }, translate(key))
-          } else {
-            listBody = groupByDay(items).map((group) =>
-              h(
-                'div',
-                { key: group.label },
-                h('div', {
-                  className: 'dshActivityGroupTitle',
-                  style: {
-                    padding: '8px 6px 2px',
-                    color: 'var(--dsw-alias-label-secondary, #666)',
-                    fontSize: '11px',
-                    fontWeight: 500,
-                    letterSpacing: '0.02em',
-                    background: 'transparent',
-                    border: '0',
-                  },
-                }, group.label),
-                h(
-                  'div',
-                  { className: 'dshActivityGroupList' },
-                  group.items.map((entry) =>
-                    h(
-                      'button',
-                      {
-                        key: entry.id || entry.title,
-                        type: 'button',
-                        className: 'dshActivityWsRow',
-                        'data-av-session': entry.id,
-                        title: entry.title,
-                        onClick: () => openSession(entry.id),
-                        style: {
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '7px',
-                          width: '100%',
-                          boxSizing: 'border-box',
-                          padding: '6px 8px',
-                          border: '0',
-                          borderRadius: '8px',
-                          background: 'transparent',
-                          color: 'inherit',
-                          font: 'inherit',
-                          fontSize: '13px',
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                          lineHeight: 1.35,
-                        },
-                      },
-                      entry.running === true
-                        ? h(
-                            'svg',
-                            {
-                              className: 'dshActivitySpin',
-                              viewBox: '0 0 24 24',
-                              width: 12,
-                              height: 12,
-                              fill: 'none',
-                              'aria-hidden': 'true',
-                              style: { flex: 'none', display: 'block' },
-                            },
-                            h('circle', {
-                              cx: 12,
-                              cy: 12,
-                              r: 9,
-                              stroke: 'currentColor',
-                              strokeWidth: 3,
-                              strokeOpacity: 0.25,
-                            }),
-                            h(
-                              'g',
-                              null,
-                              // SMIL: spins without needing the injected @keyframes rule.
-                              h('animateTransform', {
-                                attributeName: 'transform',
-                                attributeType: 'XML',
-                                type: 'rotate',
-                                from: '0 12 12',
-                                to: '360 12 12',
-                                dur: '0.85s',
-                                repeatCount: 'indefinite',
-                              }),
-                              h('path', {
-                                d: 'M12 3a9 9 0 0 1 9 9',
-                                stroke: 'currentColor',
-                                strokeWidth: 3,
-                                strokeLinecap: 'round',
-                              }),
-                            ),
-                          )
-                        : h('span', {
-                            // Inactive rows show no icon; keep a same-size spacer so
-                            // running rows' spinners and titles stay vertically aligned.
-                            'aria-hidden': 'true',
-                            style: {
-                              flex: 'none',
-                              width: '12px',
-                              height: '12px',
-                              padding: '0',
-                            },
-                          }),
-                      h('span', { className: 'dshActivityWsTitle', style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' } }, entry.title),
-                      entry.workspace === '' || entry.workspace === entry.title
-                        ? null
-                        : h('span', { className: 'dshActivityWsName', style: { flex: 'none', maxWidth: '45%', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: 'var(--dsw-alias-label-tertiary, #999)', fontSize: '11px' } }, entry.workspace),
-                      h('span', { className: 'dshActivityTime', style: { flex: 'none', marginLeft: 'auto', color: 'var(--dsw-alias-label-tertiary, #999)', fontSize: '11px' } }, formatWhen(entry.time)),
-                    ),
-                  ),
-                ),
-              ),
-            )
-          }
-
-          return h(
-            'div',
-            {
-              className: 'dshActivityView dshActivityPanel',
-              style: {
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '10px',
-                boxSizing: 'border-box',
-                height: '100%',
-                padding: '4px 2px 12px',
-                overflowY: 'auto',
-                overflowX: 'hidden',
-                color: 'var(--dsw-alias-label-primary, #1a1a1a)',
-                fontSize: '13px',
-              },
-            },
-            h(
-              'div',
-              {
-                className: 'dshActivityPanelTitle',
-                style: {
-                  flex: 'none',
-                  padding: '2px 6px 4px',
-                  fontSize: '11px',
-                  fontWeight: 500,
-                  letterSpacing: '0.02em',
-                  textTransform: 'uppercase',
-                  color: 'var(--dsw-alias-label-primary, #1a1a1a)',
-                },
-              },
-              translate('panelTitle'),
-            ),
-            listBody,
-          )
-        }
-
-        if (typeof styles !== 'undefined' && typeof styles.insert === 'function') {
-          ctx.effect(() => styles.insert(STYLE), 'activity-view:styles')
-        }
-
-        ctx.effect(() => {
-          const onDocClick = (event) => {
-            try {
-              if (!event || (event.button !== undefined && event.button !== 0)) return
-              const target = event.target
-              if (!target || typeof target.closest !== 'function') return
-              // Rows: the host wrapper swallows React handlers on this slot and its own container
-              // click turns into a New Session, so take the click in the capture phase and stop it.
-              const row = target.closest('[data-av-session]')
-              if (row) {
-                event.preventDefault()
-                event.stopPropagation()
-                const id = row.getAttribute('data-av-session') || ''
-                if (id !== '') openSession(id)
-                return
-              }
-            } catch (suppress) {}
-          }
-          document.addEventListener('click', onDocClick, true)
-          return () => document.removeEventListener('click', onDocClick, true)
-        }, 'activity-view:native-click')
-
-        for (const [localeId, dict] of Object.entries(MESSAGES)) {
-          ctx.effect(() => {
-            try {
-              const dispose = localeService?.register?.(NS, localeId, dict)
-              return typeof dispose === 'function' ? dispose : undefined
-            } catch (error) {
-              console.error('[activity-view] locale register failed', localeId, error)
-              return undefined
-            }
-          }, `activity-view:locale:${localeId}`)
-        }
-
-        // 列表变化时刷新覆盖层；窗口尺寸变化时重新定位。
-        ctx.effect(() => store.subscribe(() => syncOverlay()), 'activity-view:overlay-sync')
-        ctx.effect(() => {
-          const reposition = () => {
-            if (!overlayOpen) return
-            pinnedRegion = null
-            syncOverlay()
-          }
-          const onKey = (event) => {
-            if (event.key === 'Escape' && overlayOpen) setOverlayOpen(false)
-            // 兜底入口：插槽内的点击可能被宿主吞掉，快捷键不经过插槽。
-            if (event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && (event.key === 'A' || event.key === 'a')) {
-              event.preventDefault()
-              toggleActivityView()
-            }
-          }
-          /**
-           * 面板列表的按钮由宿主 sidebar 自己绘制（我们的组件未必是事件目标），React 的
-           * onClick 不可靠。这里在捕获阶段按 class / aria-label / 可见文案命中，最后再用
-           * 图标自身的矩形做坐标命中测试，确保无论宿主怎么包，点上去都能被我们接住。
-           */
-          const label = translate('iconLabel')
-          const matchesEntry = (node) => {
-            if (node === null) return false
-            if (node.closest('.dshActivityIcon') !== null) return true
-            if (node.closest(`[aria-label="${label}"]`) !== null) return true
-            let cursor = node
-            for (let depth = 0; depth < 4 && cursor !== null; depth += 1) {
-              const text = (cursor.textContent || '').replace(/\s+/g, ' ').trim()
-              if (text === label) return true
-              cursor = cursor.parentElement
-            }
+        checkGrouping: (modes) => {
+          if (snapshot.open !== true) {
+            if (snapshot.baseline !== null) publish({ ...snapshot, baseline: null })
             return false
           }
-          const hitOwnIcon = (event) => {
-            const icon = document.querySelector('.dshActivityIcon')
-            if (icon === null) return false
-            const rect = icon.getBoundingClientRect()
-            if (rect.width <= 0 || rect.height <= 0) return false
-            const pad = 6
-            return (
-              event.clientX >= rect.left - pad &&
-              event.clientX <= rect.right + pad &&
-              event.clientY >= rect.top - pad &&
-              event.clientY <= rect.bottom + pad
-            )
+          if (snapshot.baseline === null) {
+            publish({ ...snapshot, baseline: modes })
+            return false
           }
-          const onClickCapture = (event) => {
-            if (overlayEl !== null && overlayEl.contains(event.target)) return
-            const target = event.target instanceof Element ? event.target : null
-            if (target === null) return
-            if (!matchesEntry(target) && !hitOwnIcon(event)) return
-            event.preventDefault()
-            event.stopPropagation()
-            toggleActivityView()
-          }
-          window.addEventListener('click', onClickCapture, true)
-          window.addEventListener('resize', reposition)
-          window.addEventListener('keydown', onKey)
-          return () => {
-            window.removeEventListener('click', onClickCapture, true)
-            window.removeEventListener('resize', reposition)
-            window.removeEventListener('keydown', onKey)
-            if (overlayEl !== null) {
-              overlayEl.remove()
-              overlayEl = null
-            }
-          }
-        }, 'activity-view:overlay-lifecycle')
-
-        ctx.slots.inject('sidebar.panellist', () => {
-          return ctx.slots.register(
-            { name: 'sidebar.panellist', id: PANEL_KEY, order: 20, label: () => translate('iconLabel') },
-            ActivityIcon,
-          )
-        })
-
-        if (timerService !== undefined && typeof timerService.interval === 'function') {
-          ctx.effect(() => timerService.interval(() => void load(), POLL_MS), 'activity-view:poll')
-        }
-
-        void load()
+          if (!D.shouldLeaveActivityMode(snapshot.baseline, modes)) return false
+          publish({ ...snapshot, open: false, baseline: null })
+          return true
+        },
+      }
     }
+
+    const useStore = (store) =>
+      React.useSyncExternalStore
+        ? React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+        : store.getSnapshot()
+
+    /**
+     * 本地分钟时钟：到下一个整分钟续一次，跨午夜时分组与相对时间一起重算。
+     * 这不是数据源轮询（不碰会话 API），只是让「今天/昨天/N 分钟前」不冻结。
+     */
+    const useNow = () => {
+      const [now, setNow] = React.useState(() => Date.now())
+      React.useEffect(() => {
+        let timer = 0
+        const schedule = () => {
+          timer = setTimeout(() => {
+            setNow(Date.now())
+            schedule()
+          }, D.minuteDelay(Date.now()))
+        }
+        schedule()
+        return () => clearTimeout(timer)
+      }, [])
+      return now
+    }
+
+    /** 原生交互控件清单：只有这些子节点的点击/按键才不外溢到整行。 */
+    const INTERACTIVE = 'button,a,input,textarea,select,summary,[role="button"],[role="link"],[data-context-menu-trigger]'
+
+    /**
+     * 命中判定必须**限制在 currentTarget 之内**：`closest` 会一路向上找到外层行自己
+     * （行本身带 role=button），那不属于「行内原生控件」。所以只在 found 既不是边界本身、
+     * 又确实被边界包含时才算内部控件；无法判定包含关系时按「不抑制」处理——宁可多开一次会话，
+     * 也不能吞掉普通区域的点击。
+     */
+    const insideInteractive = (event) => {
+      const target = event?.target
+      const boundary = event?.currentTarget
+      if (target === undefined || target === null) return false
+      if (boundary === undefined || boundary === null || target === boundary) return false
+      if (typeof target.closest !== 'function') return false
+      const found = target.closest(INTERACTIVE)
+      if (found === undefined || found === null) return false
+      if (found === boundary) return false
+      if (typeof boundary.contains !== 'function') return false
+      return boundary.contains(found) === true
+    }
+
+    /**
+     * 子节点捕获：原生 leading / trailing / action 节点里可能有自己的按钮。
+     * 只有真的点到交互控件时才阻断冒泡，普通空白与文字仍然打开会话。
+     */
+    const holdInteractive = (event) => {
+      if (insideInteractive(event)) event.stopPropagation()
+    }
+
+    /**
+     * 一行原生风格的会话：leading 16 / 间隙 label-gap / 单行弹性标题 / 右侧「工作区 + 时间」。
+     *
+     * 时间列规则（已定，勿改）：running 行的时间原值不动、也不按相对时间重算，
+     * 右侧只显示工作区；否则 5 天前的会话一旦 running 就会被写成「今天」。
+     */
+    const SessionRow = (props) => {
+      const { entry, host, t, now } = props
+      const row = host?.row
+      const call = (fn) => {
+        if (typeof fn !== 'function') return null
+        try {
+          return fn(entry.id)
+        } catch (error) {
+          console.error('[activity-view] native row node failed', error)
+          return null
+        }
+      }
+      const leading = call(row?.leading)
+      const trailing = call(row?.trailing)
+      const actions = call(row?.actions)
+      const hover = call(row?.hover)
+      const when = entry.running ? '' : D.formatWhen(entry.time, now, t)
+      const open = () => {
+        try {
+          host?.actions?.openSession?.(entry.id)
+        } catch (error) {
+          console.error('[activity-view] openSession failed', error)
+        }
+      }
+      /*
+       * 右键菜单走原生 action：openSessionMenu(sessionId, displayTitle, point, mode)。
+       * 原生只有省略号按钮一处调用（mode='toggle'）；右键不是开关动作，用 'open'，
+       * 交给宿主 contextMenus.open 打开原生 session 菜单。
+       */
+      const openMenu = (event) => {
+        const menu = host?.actions?.openSessionMenu
+        if (typeof menu !== 'function') return
+        if (typeof event?.preventDefault === 'function') event.preventDefault()
+        if (typeof event?.stopPropagation === 'function') event.stopPropagation()
+        try {
+          menu(entry.id, entry.title, { x: event?.clientX ?? 0, y: event?.clientY ?? 0 }, 'open')
+        } catch (error) {
+          console.error('[activity-view] openSessionMenu failed', error)
+        }
+      }
+      /*
+       * leading 座位的合同：row.leading(id) 返回的是 SlotOutlet 元素，
+       * 即使原生没有内容也不是 null。所以不能用「非 null」判断有没有 spinner：
+       * running 行一律用自带的运行中指示，非 running 行用原生节点，原生空则留空占位。
+       */
+      /*
+       * spinner 是装饰性图形：整体 aria-hidden，不参与读屏和可访问名；
+       * 尺寸锁在 12×12 的正方框里，靠 SVG viewBox 保证无论容器怎么压都是正圆。
+       */
+      const leadingNode = entry.running
+        ? h(
+            'span',
+            { className: 'avSpin', 'aria-hidden': 'true' },
+            h(
+              'svg',
+              {
+                className: 'avSpinGlyph',
+                viewBox: '0 0 16 16',
+                width: 12,
+                height: 12,
+                focusable: 'false',
+                'aria-hidden': 'true',
+              },
+              h('circle', { className: 'avSpinTrack', cx: 8, cy: 8, r: 6.5 }),
+              h('path', { className: 'avSpinArc', d: 'M8 1.5A6.5 6.5 0 1 1 1.5 8' }),
+            ),
+          )
+        : leading !== null
+          ? leading
+          : null
+      return h(
+        'div',
+        {
+          className: entry.archived ? 'avRow avRowArchived' : 'avRow',
+          role: 'button',
+          tabIndex: 0,
+          'data-session-row': entry.id,
+          title: entry.title,
+          // 归档行按原生 linkState 灰显；点击仍交给原生 guardedOpen，由宿主提示「已归档不可打开」。
+          'aria-disabled': entry.archived ? 'true' : undefined,
+          onClick: open,
+          onContextMenu: openMenu,
+          onKeyDown: (event) => {
+            // 子按钮自己的 Enter/Space 不替整行开会话。
+            if (event?.target !== undefined && event.target !== event.currentTarget) return
+            if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+              event.preventDefault()
+              open()
+            }
+          },
+        },
+        h('span', { className: 'avLeading', onClick: holdInteractive, onKeyDown: holdInteractive }, leadingNode),
+        h('span', { className: 'avTitle' }, entry.title),
+        h(
+          'span',
+          { className: 'avMeta' },
+          entry.workspace === '' ? null : h('span', { className: 'avWorkspace' }, entry.workspace),
+          when === '' ? null : h('span', { className: 'avTime' }, when),
+        ),
+        h(
+          'span',
+          { className: 'avRowTail', onClick: holdInteractive, onKeyDown: holdInteractive },
+          trailing,
+          actions,
+          hover,
+        ),
+      )
+    }
+
+    /**
+     * 列表 occupant。宿主把 owner 摊平进 props：
+     * props.view / props.sessions / props.actions / props.row。
+     * 打开会话只走 props.actions.openSession（原生 guardedOpen：归档会话有原生保护）。
+     */
+    const ActivityList = (props) => {
+      const store = props?.store
+      const translate = props?.translate
+      const snapshotReader = props?.snapshot
+      const now = useNow()
+      useStore(store)
+      const t = pickTranslate(props)
+      const groupBy = props?.view?.groupBy
+      const orderBy = props?.view?.orderBy
+
+      /*
+       * 活动模式只提供「运行优先 + 日期组」。用户在原生菜单里改了分组或排序，
+       * 就退出活动模式并注销本 occupant，让原生列表按新选择即时生效：
+       * 不回写、不撤销用户的选择。
+       * 基线由 store 持有，所以搜索/rail 导致的临时 unmount 不会把它当新基线重置。
+       */
+      React.useEffect(() => {
+        if (store !== undefined) store.checkGrouping(D.modes({ groupBy, orderBy }))
+      }, [groupBy, orderBy, store])
+
+      let snapshot
+      if (props?.sessions?.list === undefined && typeof snapshotReader === 'function') {
+        snapshot = snapshotReader()
+      }
+      const model = D.view(props, snapshot, now)
+      const title = (group) => {
+        if (group.key === 'today') return t('today')
+        if (group.key === 'yesterday') return t('yesterday')
+        return t('earlier')
+      }
+      const body = () => {
+        if (model.status === 'unavailable') return h('div', { className: 'avNotice' }, t('unavailable'))
+        if (model.status === 'loading') return h('div', { className: 'avNotice' }, t('loading'))
+        if (model.status === 'empty') return h('div', { className: 'avNotice' }, t('empty'))
+        return model.groups.map((group) =>
+          h(
+            'div',
+            { className: 'avGroup', key: group.key },
+            // 置顶组不画标题：顶部直接是置顶行，后面紧跟原生 Today/Yesterday/Earlier，
+            // 既不加新标题，也不留空标题高度。
+            group.header === false ? null : h('div', { className: 'avGroupTitle' }, title(group)),
+            group.entries.map((entry) => h(SessionRow, { key: entry.id, entry, host: props, t, now })),
+          ),
+        )
+      }
+      // 宿主合同：wide=false 时本槽不挂载；万一被挂上也只渲染空壳，不接管列表。
+      if (props?.view?.wide === false) return h('div', { className: 'avRoot', 'data-activity-view': 'narrow' }, styleNode())
+      return h(
+        'div',
+        { className: 'avRoot', 'data-activity-view': 'list', role: 'list' },
+        styleNode(),
+        body(),
+      )
+    }
+
+    /**
+     * 导航动作行里的开关按钮：自己就是 <button>（不再嵌进原生 button 里），
+     * 原生类名全部由宿主通过 props.classes 传入，背景/配色一律不自绘。
+     * 标题 span 照原生 PanelRow 的 `clsx(panelTitle, wide)` 同时挂 panelTitle 与 wide，
+     * 字形尺寸也沿原生形态（宽 16 / 窄 18）。
+     */
+    const EntryAction = (props) => {
+      const store = props?.store
+      const translate = props?.translate
+      const state = useStore(store)
+      const open = state?.open === true
+      const classes = props?.classes ?? {}
+      const wide = props?.wide !== false
+      const t = pickTranslate(props)
+      const label = t('iconLabel')
+      const rowClass = [classes.panelRow, open ? classes.panelActive : ''].filter(Boolean).join(' ')
+      // 原生：标题 span 用 clsx(panelTitle, wide)；字形尺寸 wide ? 16 : 18。
+      const titleClass = [classes.panelTitle, classes.wide].filter(Boolean).join(' ')
+      const glyphSize = wide ? 16 : 18
+      return h(
+        'button',
+        {
+          type: 'button',
+          className: rowClass === '' ? undefined : rowClass,
+          'aria-pressed': open ? 'true' : 'false',
+          'aria-label': label,
+          title: label,
+          onClick: () => {
+            if (store !== undefined && typeof store.toggle === 'function') store.toggle()
+          },
+        },
+        h(
+          'span',
+          { className: classes.panelGlyph, 'aria-hidden': 'true' },
+          h(
+            'svg',
+            {
+              width: glyphSize,
+              height: glyphSize,
+              viewBox: '0 0 16 16',
+              focusable: 'false',
+              'aria-hidden': 'true',
+            },
+            h('path', {
+              d: 'M1.75 8h2.6l1.5-4 2.3 8 1.9-5.5 1.1 1.5h2.85',
+              fill: 'none',
+              stroke: 'currentColor',
+              'stroke-width': 1.5,
+              'stroke-linecap': 'round',
+              'stroke-linejoin': 'round',
+            }),
+          ),
+        ),
+        wide ? h('span', { className: titleClass }, t('panelTitle')) : null,
+      )
+    }
+
+    const activityExports = {
+      __activityData: D,
+      __activitySlot: {
+        key: SLOT_KEY,
+        decide: decideSlot,
+        entryKey: ENTRY_KEY,
+        entryId: ENTRY_ID,
+        entryOrder: ENTRY_ORDER,
+        decideEntry,
+      },
+      /** 声明依赖的宿主服务。 */
+      inject: ['slots', 'locale', 'sessions'],
+      apply: (ctx) => activityApply(ctx),
+    }
+
+    function activityApply(ctx) {
+      const slotsService = ctx?.slots ?? (typeof ctx?.get === 'function' ? ctx.get('slots') : undefined)
+      const localeService = ctx?.locale ?? (typeof ctx?.get === 'function' ? ctx.get('locale') : undefined)
+      const sessionsService = ctx?.sessions ?? (typeof ctx?.get === 'function' ? ctx.get('sessions') : undefined)
+
+      const store = createStore()
+      const readSnapshot = createSnapshotReader(sessionsService)
+
+      /*
+       * 语言：按原生范式把 {zh,en} 字典注册进宿主 locale 服务（ctx.effect 负责随插件回收），
+       * entry.locale=NS 让 SlotOutlet 把绑定后的 t 交给组件；组件侧优先用 props.t。
+       * 兜底只在 bind 不可用时用自带英文表，不做任何 language()/getLocale 字段猜测。
+       */
+      const translate = (key, params) => {
+        try {
+          const bound = typeof localeService?.bind === 'function' ? localeService.bind(NS) : undefined
+          if (typeof bound === 'function') {
+            const value = bound(key, params)
+            if (typeof value === 'string' && value !== '') return value
+          }
+        } catch (error) {
+          console.error('[activity-view] locale bind failed', error)
+        }
+        return interpolate(MESSAGES.en[key] ?? key, params)
+      }
+
+      try {
+        ctx?.effect?.(() => localeService?.register?.(NS, MESSAGES), 'activity-view: dictionaries')
+        ctx?.effect?.(() => {
+          const off = localeService?.subscribe?.(() => store.bumpLocale())
+          return () => {
+            if (typeof off === 'function') off()
+          }
+        }, 'activity-view: locale subscription')
+      } catch (error) {
+        console.error('[activity-view] locale wiring failed', error)
+      }
+
+      if (slotsService === undefined || typeof slotsService.inject !== 'function' || typeof slotsService.register !== 'function') {
+        console.warn('[activity-view] slots service lacks inject/register; nothing mounted.')
+        return
+      }
+
+      /** 当前需要回收的注册（开关关闭、宿主撤销声明、插件销毁都要走这里）。 */
+      let disposeList
+      let disposeEntry
+      const injectedDispose = { list: undefined, entry: undefined }
+
+      const teardown = () => {
+        if (disposeList !== undefined) {
+          const dispose = disposeList
+          disposeList = undefined
+          dispose()
+        }
+        if (disposeEntry !== undefined) {
+          const dispose = disposeEntry
+          disposeEntry = undefined
+          dispose()
+        }
+      }
+
+      const readSpec = (key) => {
+        try {
+          return slotsService.spec?.(key)
+        } catch (error) {
+          console.error(`[activity-view] cannot read slot spec ${key}`, error)
+          return undefined
+        }
+      }
+
+      const registerList = () => {
+        const decided = decideSlot(readSpec(SLOT_KEY))
+        if (!decided.mounted) {
+          if (decided.reason !== 'undeclared') {
+            console.warn(`[activity-view] refusing to occupy ${SLOT_KEY}: ${decided.reason}`)
+          }
+          return undefined
+        }
+        // 同步 callback → Dispose 合同：inject 的工厂直接返回 register() 的注销函数。
+        try {
+          return slotsService.register(
+            {
+              name: SLOT_KEY,
+              locale: NS,
+              inject: () => ({ store, translate, snapshot: readSnapshot }),
+            },
+            ActivityList,
+          )
+        } catch (error) {
+          // single 槽同优先级已被占（别的插件/原生 occupant）：不抢位，直接退回原生。
+          console.warn(`[activity-view] could not occupy ${SLOT_KEY}`, error)
+          return undefined
+        }
+      }
+
+      /** 开关状态 → 是否占用列表插槽。关闭即注销，SlotOutlet 立刻回落原生列表。 */
+      const syncListOccupant = () => {
+        const want = store.isOpen()
+        if (want && disposeList === undefined) {
+          const dispose = registerList()
+          if (dispose !== undefined) disposeList = dispose
+          else store.setOpen(false)
+          return
+        }
+        if (!want && disposeList !== undefined) {
+          const dispose = disposeList
+          disposeList = undefined
+          dispose()
+        }
+      }
+
+      /** 入口按钮只有「列表扩展点 + 导航动作行」都声明时才挂，缺一个就不留死按钮。 */
+      const entryReady = () =>
+        decideSlot(readSpec(SLOT_KEY)).mounted && decideEntry(readSpec(ENTRY_KEY)).mounted
+
+      const registerEntry = () => {
+        const decided = decideEntry(readSpec(ENTRY_KEY))
+        if (!decided.mounted) {
+          if (decided.reason !== 'undeclared') {
+            console.warn(`[activity-view] refusing to occupy ${ENTRY_KEY}: ${decided.reason}`)
+          }
+          return undefined
+        }
+        try {
+          return slotsService.register(
+            {
+              name: ENTRY_KEY,
+              locale: NS,
+              id: ENTRY_ID,
+              order: ENTRY_ORDER,
+              inject: () => ({ store, translate }),
+            },
+            EntryAction,
+          )
+        } catch (error) {
+          console.warn(`[activity-view] could not occupy ${ENTRY_KEY}`, error)
+          return undefined
+        }
+      }
+
+      const syncEntry = () => {
+        if (entryReady() && disposeEntry === undefined) {
+          const dispose = registerEntry()
+          if (dispose !== undefined) disposeEntry = dispose
+          return
+        }
+        if (!entryReady() && disposeEntry !== undefined) {
+          const dispose = disposeEntry
+          disposeEntry = undefined
+          dispose()
+        }
+      }
+
+      const offOpen = store.subscribe(syncListOccupant)
+      try {
+        ctx?.effect?.(() => () => {
+          offOpen()
+          teardown()
+          for (const key of ['list', 'entry']) {
+            const dispose = injectedDispose[key]
+            injectedDispose[key] = undefined
+            if (typeof dispose === 'function') dispose()
+          }
+        }, 'activity-view: teardown')
+      } catch (error) {
+        console.error('[activity-view] effect registration failed', error)
+      }
+
+      /*
+       * 两个插槽各自等宿主声明（老宿主永远不会触发）。到达顺序不固定，任何一边到达
+       * 都重新求值：列表扩展点决定 occupant 挂/卸，两个都齐了才追加导航动作行按钮。
+       */
+      const subscribeKey = (key, onArrive) => {
+        try {
+          const dispose = slotsService.inject(key, () => {
+            onArrive()
+            return () => {
+              teardown()
+            }
+          })
+          return typeof dispose === 'function' ? dispose : undefined
+        } catch (error) {
+          console.warn(`[activity-view] slots.inject failed for ${key}`, error)
+          return undefined
+        }
+      }
+
+      const resync = () => {
+        syncListOccupant()
+        syncEntry()
+      }
+
+      injectedDispose.list = subscribeKey(SLOT_KEY, resync)
+      injectedDispose.entry = subscribeKey(ENTRY_KEY, resync)
+
+      // 唯一的模式切换入口：外部（宿主新 nav action / 未来的入口 occupant）通过它切 mode。
+      activityExports.__activityMode = {
+        isOpen: () => store.isOpen(),
+        setOpen: (open) => store.setOpen(open === true),
+        toggle: () => store.toggle(),
+        checkGrouping: (modes) => store.checkGrouping(modes),
+        subscribe: (listener) => store.subscribe(listener),
+        getSnapshot: () => store.getSnapshot(),
+        entryKey: ENTRY_KEY,
+        entryId: ENTRY_ID,
+        entryOrder: ENTRY_ORDER,
+      }
+    }
+
     return activityExports
   },
 })

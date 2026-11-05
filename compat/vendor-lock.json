@@ -1,0 +1,45 @@
+{
+  "note": "兼容包的原生来源锁定：版本、文件与 sha256。来源为已安装应用 app.asar 内条目，未经改写。",
+  "asarDefault": "/Applications/DSH NEXT.app/Contents/Resources/app.asar",
+  "appVersion": "2.0.22-next",
+  "packages": {
+    "@deepseek-ai/dsh-client-ui-sidebar": {
+      "version": "0.2.2-rc.1",
+      "target": "compat/ui-sidebar",
+      "patch": "patches/0002-sidebar-navigation-action-slot.patch",
+      "localName": "@local/activity-ui-sidebar",
+      "files": {
+        "lib/client.js": "b6085dca1d2e1e48a3d4d8eaef609613af5201100552476c16119cd1ced136b1",
+        "lib/index.js": "be323c589cda4dbb7714df563ebb66f581a3d37ed2ab6859fed85fcebf970aea",
+        "LICENSE": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+        "locale/de.json": "0ef103e44bbd4b3307c9b685c91401bb5fbc472d9be028897bf31749c32dc6e6",
+        "locale/en.json": "741eed158e9d7ada56a85f9e72cfcb46463d5b75a4e4a6d5cf639b95e6960e96",
+        "locale/es.json": "6dc506bee0746df55dfbef98f857fa7a304245182a08f00c57fa5d1f92d87aec",
+        "locale/fr.json": "cf842a46b1d7b932d24e184a2aa72a4e40df4bc7e338d68f0fe7209c852f31dd",
+        "locale/ja.json": "191d098d5f1e7b1a6383d146f04ec3393bb8f738bd23474896601830f5962fc8",
+        "locale/pt.json": "7c60eff5963c09bc2b0139bf667a312560554d3bb56baf8004af2bec50dcf661",
+        "locale/ru.json": "43d4b6ee0711dd877a35091641732a34163585cd960564a927948032dd621d67",
+        "locale/zh.json": "83830de09aa02a4a35d12380a5bc90cf60b0925ea44c62ca75d3a69b8e13e19a"
+      }
+    },
+    "@deepseek-ai/dsh-client-ui-workspace": {
+      "version": "0.2.2-rc.1",
+      "target": "compat/ui-workspace",
+      "patch": "patches/0001-sidebar-workspaces-sessions-slot.patch",
+      "localName": "@local/activity-ui-workspace",
+      "files": {
+        "lib/client.js": "89b32d7916cb56dacb40d36d91fadbd627c1890fe84eb357a5ba9bfdd21c901b",
+        "lib/index.js": "e6cdc4b725585354102a5c4598c9d8c79d6abac62d7979c09919821716370438",
+        "LICENSE": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+        "locale/de.json": "66d5178a25237d15fc15d0c103eb77bd4f9a6bbb7209d942836825caca7eb9f2",
+        "locale/en.json": "58660c34349db343475836034272157ccb2604dd088542669541c9a655eea926",
+        "locale/es.json": "7aae16329c30d4891cb8a26d02f9366bd9231cf227ca06af1ecdf552d8627703",
+        "locale/fr.json": "c1092984f6f2b71f75c64a597b3769c85c705bfeb56844cdd82853ef2c91a87a",
+        "locale/ja.json": "cfd034ce3f8476cb0e02290024b37f6810b249050105783ecbdc8d6dc89cbecb",
+        "locale/pt.json": "e0d654def02235c2e0495f473707c235169274f3bb63ae691e0057d7e5566629",
+        "locale/ru.json": "af4f87c58505b490f0c17e4d6d98126cf2bfdb1047478b0a2b107cd4c7632dc6",
+        "locale/zh.json": "86c465613dfe60697612ab8a999e0106b3f04892aa45ddf0c987f2b5f58b928b"
+      }
+    }
+  }
+}

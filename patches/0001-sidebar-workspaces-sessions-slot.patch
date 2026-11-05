@@ -1,0 +1,71 @@
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -3938,6 +3938,38 @@
+ 					console.warn("session unarchive rejected:", reason);
+ 				});
+ 			};
++			const sessionsSlotOwner = {
++				view: {
++					groupBy,
++					orderBy,
++					archivedFilter,
++					wide,
++					ready: list.phase === "ready" && workspaceReady
++				},
++				sessions: {
++					list,
++					workspaces: orderedWorkspaces,
++					ungroupedSessionIds: orderedUngroupedSessionIds,
++					flatSessionIds: orderedFlatSessionIds,
++					currentSessionId: currentBlank,
++					archivedSessionIds,
++					pinnedSessionIds,
++					home
++				},
++				actions: {
++					openSession: guardedOpen,
++					openSessionMenu,
++					startSession,
++					setArchivedFilter: actions.setArchivedFilter,
++					setGroupBy: actions.setGroupBy
++				},
++				row: {
++					actions: (sessionId) => renderSlot("sidebar.workspaces.session.row.action", { sessionId }),
++					leading: (sessionId) => renderSlot("sidebar.session.row.leading", { sessionId }),
++					trailing: (sessionId) => renderSlot("sidebar.session.row.trailing", { sessionId }),
++					hover: (sessionId) => renderSlot("sidebar.session.row.hover", { sessionId })
++				}
++			};
+ 			return (0, react_jsx_runtime.jsxs)("div", {
+ 				className: clsx(WorkspaceBrowser_module_css_default.root, !wide && WorkspaceBrowser_module_css_default.rail),
+ 				children: [
+@@ -4095,7 +4127,8 @@
+ 							remote: remoteSearch,
+ 							resultLimit: searchResultLimit,
+ 							t
+-						}) : groupBy === "flat" ? (0, react_jsx_runtime.jsx)(FlatList, {
++						}) : renderSlot("sidebar.workspaces.sessions", sessionsSlotOwner, {
++							fallback: groupBy === "flat" ? (0, react_jsx_runtime.jsx)(FlatList, {
+ 							useSessionAccess,
+ 							usePanelInfo,
+ 							list,
+@@ -4147,6 +4180,8 @@
+ 							onSessionRevealed: acknowledgeSessionReveal,
+ 							home,
+ 							t
++						}),
++							hookContext: sessionsSlotOwner
+ 						}))
+ 					}),
+ 					workspaceActionRequest !== null && (0, react_jsx_runtime.jsx)(WorkspaceDialogs, {
+@@ -6071,6 +6106,10 @@
+ 					"sidebar.session.row.hover": {
+ 						kind: "list",
+ 						scope: "root"
++					},
++					"sidebar.workspaces.sessions": {
++						kind: "single",
++						scope: "root"
+ 					}
+ 				},
+ 				store: viewStore,

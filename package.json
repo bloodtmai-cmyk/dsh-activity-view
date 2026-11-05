@@ -13,6 +13,9 @@
     "sidebar",
     "sessions"
   ],
+  "engines": {
+    "dsh": "0.2.2-rc.1"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -23,6 +26,8 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
+    "compat",
+    "patches",
     "locale",
     "icon.svg",
     "README.md",

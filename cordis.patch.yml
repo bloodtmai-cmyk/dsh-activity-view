@@ -1,3 +1,24 @@
+# dsh-activity-view bundle patch（root 包自带，随本包安装/卸载整层生效）
+#
+# 1) 按真实 row id 关掉原生两行：row id 取自 @deepseek-ai/dsh-web-app/cordis.patch.yml
+#    （L275-276 `ui-sidebar`、L366-367 `ui-workspace`）。这里只写 `disabled: true`，
+#    不替换任何 config；删除本 bundle 后这两行自然回到启用状态。
+# 2) 插入三行：两个兼容包 + 本插件。
+#    name 的相对路径由 Loader 的 anchorInsertedPluginNames() 按**本 patch 文件所在目录**
+#    解析（@deepseek-ai/dsh-app-boot: anchorInsertedPluginNames），因此必须给到文件路径：
+#    真实导入走 @deepseek-ai/cordis-plugin-loader 的 import()，Node ESM 不接受目录 URL
+#    （ERR_UNSUPPORTED_DIR_IMPORT），目录形式的 name 会在挂载时直接失败。
+# 3) 注意：root 包 package.json 的 engines.dsh 是整包闸门——DSH 运行时版本不匹配时
+#    loadProfileDirectory() 把本 bundle 整体跳过（skippedBundles），这一层补丁（含上面
+#    两行 disabled）根本不生效，原生 UI 原样保留，不会出现“原生已关、兼容包没上”的空白。
+- id: ui-sidebar
+  disabled: true
+- id: ui-workspace
+  disabled: true
 - insert:
+    - id: activity-ui-workspace
+      name: ./compat/ui-workspace/lib/index.js
+    - id: activity-ui-sidebar
+      name: ./compat/ui-sidebar/lib/index.js
     - id: activity-view
       name: dsh-activity-view

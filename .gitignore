@@ -1,3 +1,19 @@
 node_modules/
 *.tgz
 .DS_Store
+
+.projectmem/events.jsonl
+.projectmem/watch.pid
+.projectmem/watch.log
+.projectmem/structure.json
+
+# 宿主代理提取的 builtin/staging 临时产物（不是源码，不入库）
+.stage-hostpatch/
+
+# 本地 linked 部署候选（由 tools/make-linked-candidate.mjs 生成，不入库）
+.stage-candidate/
+
+# 根级现场/过程产物一律不入库（staging 快照、ProjectMem 本地记忆、现场日志）
+/.stage-*/
+/.projectmem/
+/logs/
