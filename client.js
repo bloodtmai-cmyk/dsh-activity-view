@@ -503,6 +503,8 @@ button.dshActivityIcon:focus-visible {
          */
         let overlayOpen = false
         let overlayEl = null
+        /** 打开时算一次区域，之后只复用；重新测量会和外层视口互相影响，导致面板越缩越小。 */
+        let pinnedRegion = null
         const modeListeners = new Set()
         const publishMode = (next) => {
           overlayOpen = next
@@ -613,6 +615,17 @@ button.dshActivityIcon:focus-visible {
               }
             }
             if (chosen !== null) {
+              let element = chosen.element
+              for (let up = 0; up < 4; up += 1) {
+                const parent = element.parentElement
+                if (parent === null) break
+                const parentRect = parent.getBoundingClientRect()
+                if (Math.abs(parentRect.height - chosen.rect.height) > 6) break
+                if (parentRect.width > 560) break
+                if (parentRect.width - chosen.rect.width > 56) break
+                element = parent
+                chosen = { ...chosen, element, rect: parentRect, area: parentRect.width * parentRect.height }
+              }
               return {
                 left: chosen.rect.left,
                 top: chosen.rect.top,
@@ -637,7 +650,8 @@ button.dshActivityIcon:focus-visible {
 
         const paintOverlay = (host) => {
           const state = store.snapshot
-          const region = findRegion()
+          if (pinnedRegion === null) pinnedRegion = findRegion()
+          const region = pinnedRegion
           const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
           const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
           const width = Math.max(220, Math.min(Math.round(region.width) || 0, Math.max(240, viewportWidth - 32)))
@@ -649,37 +663,19 @@ button.dshActivityIcon:focus-visible {
           host.style.width = `${width}px`
           host.style.height = `${height}px`
           host.style.background =
-            region.background !== '' ? region.background : 'var(--dsw-alias-bg-primary, Canvas)'
+            'var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1, Canvas))'
           host.textContent = ''
-
-          const header = document.createElement('div')
-          header.style.cssText =
-            'flex:none;display:flex;align-items:center;gap:8px;padding:6px 8px 4px;'
-          const title = document.createElement('span')
-          title.textContent = translate('panelTitle')
-          title.style.cssText =
-            'flex:1;min-width:0;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dsw-alias-label-secondary,#8a8a8a);'
-          header.appendChild(title)
-          const close = document.createElement('button')
-          close.type = 'button'
-          close.setAttribute('data-av-close', 'true')
-          close.setAttribute('aria-label', translate('iconLabel'))
-          close.textContent = '×'
-          close.style.cssText =
-            'flex:none;width:20px;height:20px;padding:0;border:0;border-radius:5px;background:transparent;color:inherit;font:14px/1 ui-sans-serif,system-ui,sans-serif;cursor:pointer;opacity:.7;'
-          header.appendChild(close)
-          host.appendChild(header)
 
           const body = document.createElement('div')
           body.style.cssText =
-            'flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:2px 4px 10px;'
+            'flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:4px 6px 12px;font:inherit;'
           host.appendChild(body)
 
           const message = (text) => {
             const node = document.createElement('div')
             node.textContent = text
             node.style.cssText =
-              'padding:14px 8px;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#667);'
+              'padding:14px 8px;font-size:12.5px;line-height:1.5;color:var(--dsw-alias-label-secondary, inherit);'
             return node
           }
 
@@ -709,7 +705,7 @@ button.dshActivityIcon:focus-visible {
             const heading = document.createElement('div')
             heading.textContent = group.label
             heading.style.cssText =
-              'padding:8px 6px 2px;font-size:11px;font-weight:500;letter-spacing:.02em;color:var(--dsw-alias-label-secondary,#667);'
+              'padding:10px 6px 4px;font-size:11px;font-weight:500;letter-spacing:.02em;color:var(--dsw-alias-label-secondary, inherit);opacity:.8;'
             body.appendChild(heading)
 
             for (const entry of group.items) {
@@ -718,7 +714,13 @@ button.dshActivityIcon:focus-visible {
               row.setAttribute('data-av-session', entry.id)
               row.title = entry.title
               row.style.cssText =
-                'display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:6px 8px;margin:1px 0;border:0;border-radius:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;'
+                'display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;height:30px;padding:0 8px;margin:0;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px;text-align:left;cursor:pointer;'
+              row.addEventListener('mouseenter', () => {
+                row.style.background = 'var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.12))'
+              })
+              row.addEventListener('mouseleave', () => {
+                row.style.background = 'transparent'
+              })
 
               const dot = document.createElement('span')
               dot.style.cssText = `flex:none;width:6px;height:6px;border-radius:50%;background:${
@@ -731,13 +733,13 @@ button.dshActivityIcon:focus-visible {
               const title = document.createElement('span')
               title.textContent = entry.title
               title.style.cssText =
-                'font-size:12.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+                'font-size:13px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
               text.appendChild(title)
               if (entry.workspace !== '') {
                 const workspace = document.createElement('span')
                 workspace.textContent = entry.workspace
                 workspace.style.cssText =
-                  'font-size:10.5px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary,#8a8a8a);'
+                  'font-size:11px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary, inherit);opacity:.85;'
                 text.appendChild(workspace)
               }
               row.appendChild(text)
@@ -745,7 +747,7 @@ button.dshActivityIcon:focus-visible {
               const when = document.createElement('span')
               when.textContent = formatWhen(entry.time)
               when.style.cssText =
-                'flex:none;font-size:10.5px;color:var(--dsw-alias-label-secondary,#8a8a8a);'
+                'flex:none;font-size:11px;color:var(--dsw-alias-label-secondary, inherit);opacity:.7;'
               row.appendChild(when)
 
               body.appendChild(row)
@@ -792,6 +794,7 @@ button.dshActivityIcon:focus-visible {
 
         const paintSync = () => {
           if (!overlayOpen) {
+            pinnedRegion = null
             if (overlayEl !== null) {
               overlayEl.remove()
               overlayEl = null
@@ -809,8 +812,11 @@ button.dshActivityIcon:focus-visible {
               'display:flex',
               'flex-direction:column',
               'min-height:0',
-              'border-radius:10px',
-              'box-shadow:0 12px 32px rgba(0, 0, 0, 0.14)',
+              'border-radius:0',
+              'border:0',
+              'box-shadow:none',
+              'font:inherit',
+              'color:var(--dsw-alias-label-primary, inherit)',
             ].join(';')
             host.addEventListener(
               'mousedown',
@@ -1193,7 +1199,9 @@ button.dshActivityIcon:focus-visible {
         ctx.effect(() => store.subscribe(() => syncOverlay()), 'activity-view:overlay-sync')
         ctx.effect(() => {
           const reposition = () => {
-            if (overlayOpen) syncOverlay()
+            if (!overlayOpen) return
+            pinnedRegion = null
+            syncOverlay()
           }
           const onKey = (event) => {
             if (event.key === 'Escape' && overlayOpen) setOverlayOpen(false)
@@ -1245,12 +1253,10 @@ button.dshActivityIcon:focus-visible {
           }
           window.addEventListener('click', onClickCapture, true)
           window.addEventListener('resize', reposition)
-          window.addEventListener('scroll', reposition, true)
           window.addEventListener('keydown', onKey)
           return () => {
             window.removeEventListener('click', onClickCapture, true)
             window.removeEventListener('resize', reposition)
-            window.removeEventListener('scroll', reposition, true)
             window.removeEventListener('keydown', onKey)
             if (overlayEl !== null) {
               overlayEl.remove()
