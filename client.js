@@ -665,11 +665,13 @@ button.dshActivityIcon:focus-visible {
           const countRows = (element) => {
             let rows = 0
             let sample = null
+            let bottom = element.getBoundingClientRect().top
             const visit = (parent, depth) => {
               for (const child of parent.children) {
                 const rect = child.getBoundingClientRect()
                 if (rowLike(rect)) {
                   rows += 1
+                  if (rect.bottom > bottom) bottom = rect.bottom
                   if (sample === null) sample = child
                 } else if (depth < 2 && child.children.length > 0 && rect.height >= 56) {
                   visit(child, depth + 1)
@@ -678,7 +680,7 @@ button.dshActivityIcon:focus-visible {
               }
             }
             visit(element, 0)
-            return { rows, sample }
+            return { rows, sample, rowsBottom: bottom }
           }
 
           let best = null
@@ -696,7 +698,7 @@ button.dshActivityIcon:focus-visible {
             if (measured.rows < 3) continue
             const score = measured.rows + (scrollable ? 3 : 0)
             if (best === null || score > best.score || (score === best.score && rect.height > best.rect.height)) {
-              best = { element, rect, score, sample: measured.sample, scrollable }
+              best = { element, rect, score, sample: measured.sample, scrollable, rowsBottom: measured.rowsBottom }
             }
           }
           if (best === null) return null
@@ -706,7 +708,10 @@ button.dshActivityIcon:focus-visible {
           const left = best.rect.left + num(boxStyle.borderLeftWidth)
           const top = best.rect.top + num(boxStyle.borderTopWidth)
           const width = best.rect.width - num(boxStyle.borderLeftWidth) - num(boxStyle.borderRightWidth)
-          const height = best.rect.height - num(boxStyle.borderTopWidth) - num(boxStyle.borderBottomWidth)
+          const fullHeight = best.rect.height - num(boxStyle.borderTopWidth) - num(boxStyle.borderBottomWidth)
+          // 只覆盖到最后一行的下沿：容器本身可能还包含下面的别的区块（例如远程控制），
+          // 直接用容器高度会盖过去。
+          const height = Math.max(160, Math.min(fullHeight, best.rowsBottom - top + 8))
 
           let background = ''
           let cursor = best.element
@@ -724,6 +729,7 @@ button.dshActivityIcon:focus-visible {
           const fontStyle = window.getComputedStyle(fontSource)
           return {
             source: 'list',
+            element: best.element,
             left,
             top,
             width,
@@ -757,7 +763,12 @@ button.dshActivityIcon:focus-visible {
           host.style.width = `${width}px`
           host.style.height = `${height}px`
           // 底色只认侧栏专用填充色：采样的祖先色会把 body 的底色带进来，正是"白框"的来源。
-          host.style.background = 'var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1, Canvas))'
+          let fill = ''
+          if (region.element !== undefined && region.element !== null) {
+            fill = window.getComputedStyle(region.element).getPropertyValue('--dsw-specific-sidebar-fill').trim()
+          }
+          host.style.background =
+            fill !== '' ? fill : region.background !== '' && region.background !== undefined ? region.background : 'transparent'
           host.style.color = 'var(--dsw-alias-label-primary, inherit)'
           host.textContent = ''
 
@@ -848,7 +859,10 @@ button.dshActivityIcon:focus-visible {
                 row.style.background = 'transparent'
               })
 
-              if (entry.running === true) row.appendChild(spinner())
+              const lead = document.createElement('span')
+              lead.style.cssText = 'flex:none;width:12px;height:12px;display:inline-flex;align-items:center;justify-content:center;'
+              if (entry.running === true) lead.appendChild(spinner())
+              row.appendChild(lead)
 
               const title = document.createElement('span')
               title.className = 'dshActivityWsTitle'
