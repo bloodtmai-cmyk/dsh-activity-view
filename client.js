@@ -493,12 +493,21 @@ button.dshActivityIcon:focus-visible {
           }
         }
 
-        /** Module-level toggle state so the icon and the swapped region stay in sync. */
-        let activityActive = false
-        let workspaceSlotDispose
+        /**
+         * 侧栏活动视图（覆盖式）。
+         *
+         * `sidebar.workspaces` 由 shell 的 sidebar 条目声明——catalog 里写得很清楚：「declaring is
+         * claiming」。插件在 apply 期或运行期的 register 都只会留下一个 active:false 的占用者，
+         * 原生浏览器照旧渲染，界面没有任何变化。所以这里不再和插槽较劲，改为在原生会话列表上方
+         * 铺一块自己的面板：点侧栏图标开，再点关，关掉即原样露出原生列表。
+         */
+        let overlayOpen = false
+        let overlayEl = null
+        /** 打开时算一次区域，之后只复用；重新测量会和外层视口互相影响，导致面板越缩越小。 */
+        let pinnedRegion = null
         const modeListeners = new Set()
         const publishMode = (next) => {
-          activityActive = next
+          overlayOpen = next
           for (const listener of modeListeners) {
             try {
               listener(next)
@@ -516,36 +525,422 @@ button.dshActivityIcon:focus-visible {
               modeListeners.delete(listener)
             }
           }, [])
-          return activityActive
+          return overlayOpen
+        }
+
+        /** Recency order with running sessions pinned on top. */
+        const sortEntries = (entries) =>
+          entries.slice().sort((left, right) => {
+            const a = typeof left.time === 'number' ? left.time : Date.parse(left.time) || 0
+            const b = typeof right.time === 'number' ? right.time : Date.parse(right.time) || 0
+            const ra = left.running === true ? 1 : 0
+            const rb = right.running === true ? 1 : 0
+            if (ra !== rb) return rb - ra
+            return b - a
+          })
+
+        /** Today / Yesterday / Earlier bucket for one timestamp. */
+        const dayLabel = (time) => {
+          const when = typeof time === 'number' ? time : Date.parse(String(time ?? ''))
+          const startOfToday = new Date()
+          startOfToday.setHours(0, 0, 0, 0)
+          const todayStart = startOfToday.getTime()
+          if (!Number.isFinite(when)) return translate('earlier')
+          if (when >= todayStart) return translate('today')
+          if (when >= todayStart - 86400000) return translate('yesterday')
+          return translate('earlier')
+        }
+
+        /**
+         * 找原生「会话列表」那片区域。
+         *
+         * 不猜固定像素：候选 = 位于左栏的容器（宽度/高度像列表），先按**已知会话标题**命中的
+         * 数量分组，命中多的组里取面积最小的那个；没有标题可用时退到「可滚动的左栏容器里
+         * 面积最小」这一个结构特征。两者都失败才用一个只占左栏的小面板兜底。
+         */
+        const findRegion = () => {
+          const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
+          const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
+          const background = (element) => {
+            let cursor = element
+            for (let up = 0; up < 6 && cursor !== null; up += 1) {
+              const colour = window.getComputedStyle(cursor).backgroundColor
+              if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') return colour
+              cursor = cursor.parentElement
+            }
+            return ''
+          }
+          try {
+            const titles = (Array.isArray(store.snapshot.items) ? store.snapshot.items : [])
+              .map((entry) => (typeof entry.title === 'string' ? entry.title.trim() : ''))
+              .filter((title) => title.length >= 3)
+              .slice(0, 12)
+            const leftColumnLimit = Math.min(720, Math.max(420, viewportWidth * 0.45))
+            const candidates = []
+            for (const element of document.querySelectorAll('*')) {
+              if (element === overlayEl || (overlayEl !== null && element.contains(overlayEl))) continue
+              const rect = element.getBoundingClientRect()
+              if (rect.width < 150 || rect.width > 640) continue
+              if (rect.height < 180) continue
+              if (rect.left < 0 || rect.left > leftColumnLimit) continue
+              const text = element.textContent || ''
+              let hits = 0
+              for (const title of titles) {
+                if (text.includes(title)) hits += 1
+              }
+              const style = window.getComputedStyle(element)
+              const scrollable =
+                /auto|scroll/.test(style.overflowY) || element.scrollHeight > element.clientHeight + 8
+              candidates.push({ hits, scrollable, area: rect.width * rect.height, element, rect })
+            }
+            const choose = (pool) => {
+              let best = null
+              for (const candidate of pool) {
+                if (best === null || candidate.area < best.area) best = candidate
+              }
+              return best
+            }
+            let chosen = null
+            if (candidates.length > 0) {
+              let topHits = 0
+              for (const candidate of candidates) {
+                if (candidate.hits > topHits) topHits = candidate.hits
+              }
+              if (topHits > 0) {
+                chosen = choose(candidates.filter((candidate) => candidate.hits === topHits))
+              }
+              if (chosen === null) {
+                const scrolling = candidates.filter((candidate) => candidate.scrollable)
+                chosen = choose(scrolling.length > 0 ? scrolling : candidates)
+              }
+            }
+            if (chosen !== null) {
+              let element = chosen.element
+              for (let up = 0; up < 4; up += 1) {
+                const parent = element.parentElement
+                if (parent === null) break
+                const parentRect = parent.getBoundingClientRect()
+                if (Math.abs(parentRect.height - chosen.rect.height) > 6) break
+                if (parentRect.width > 560) break
+                if (parentRect.width - chosen.rect.width > 56) break
+                element = parent
+                chosen = { ...chosen, element, rect: parentRect, area: parentRect.width * parentRect.height }
+              }
+              return {
+                left: chosen.rect.left,
+                top: chosen.rect.top,
+                width: chosen.rect.width,
+                height: chosen.rect.height,
+                background: background(chosen.element),
+              }
+            }
+          } catch (error) {
+            console.error('[activity-view] locate sidebar list failed', error)
+          }
+          // 兜底：左侧栏里一块带内边距的小面板，绝不覆盖整屏。
+          const left = Math.min(120, Math.round(viewportWidth * 0.05) + 56)
+          return {
+            left,
+            top: 72,
+            width: Math.min(300, Math.max(220, viewportWidth - left - 24)),
+            height: Math.min(520, Math.max(240, viewportHeight - 160)),
+            background: '',
+          }
+        }
+
+        /**
+         * 直接量**一个真实会话行**，用它和它所在的滚动容器反推这一列的确切几何与字体：
+         * 面板的边框盒 = 容器 padding box，行距 = 真实行高，左缩进 = 真实行到容器左边的距离，
+         * 字体/颜色 = 真实行的 computed style。这样不需要猜任何数值，也不会比原生偏右或窄一截。
+         */
+        const measureListBox = () => {
+          try {
+            const titles = (Array.isArray(store.snapshot.items) ? store.snapshot.items : [])
+              .map((entry) => (typeof entry.title === 'string' ? entry.title.trim() : ''))
+              .filter((title) => title.length >= 3)
+              .slice(0, 12)
+            if (titles.length === 0) return null
+            const limit = Math.min(720, Math.max(420, window.innerWidth * 0.45))
+            let row = null
+            for (const element of document.querySelectorAll('button, a, li, [role="button"], div')) {
+              if (overlayEl !== null && (element === overlayEl || element.contains(overlayEl))) continue
+              if (element.children.length > 4) continue
+              const text = (element.textContent || '').replace(/\s+/g, ' ').trim()
+              if (text === '') continue
+              const matched = titles.some((title) => text === title || text.startsWith(title) || title.startsWith(text))
+              if (!matched) continue
+              const rect = element.getBoundingClientRect()
+              if (rect.width < 80 || rect.height < 16 || rect.height > 64) continue
+              if (rect.left > limit || rect.bottom < 0) continue
+              if (row === null || rect.top < row.getBoundingClientRect().top) row = element
+            }
+            if (row === null) return null
+            const rowRect = row.getBoundingClientRect()
+            const rowStyle = window.getComputedStyle(row)
+
+            let box = row.parentElement
+            while (box !== null) {
+              const style = window.getComputedStyle(box)
+              if (/auto|scroll/.test(style.overflowY) || box.scrollHeight > box.clientHeight + 4) break
+              box = box.parentElement
+            }
+            if (box === null || box === document.body || box === document.documentElement) return null
+            const boxStyle = window.getComputedStyle(box)
+            const num = (value) => Number.parseFloat(value) || 0
+            const boxRect = box.getBoundingClientRect()
+            const left = boxRect.left + num(boxStyle.borderLeftWidth)
+            const top = boxRect.top + num(boxStyle.borderTopWidth)
+            const width = boxRect.width - num(boxStyle.borderLeftWidth) - num(boxStyle.borderRightWidth)
+            const height = boxRect.height - num(boxStyle.borderTopWidth) - num(boxStyle.borderBottomWidth)
+            if (width < 150 || height < 120) return null
+            const background = (() => {
+              let cursor = box
+              for (let up = 0; up < 6 && cursor !== null; up += 1) {
+                const colour = window.getComputedStyle(cursor).backgroundColor
+                if (colour !== '' && colour !== 'transparent' && colour !== 'rgba(0, 0, 0, 0)') return colour
+                cursor = cursor.parentElement
+              }
+              return ''
+            })()
+            return {
+              left,
+              top,
+              width,
+              height,
+              background,
+              rowHeight: rowRect.height,
+              rowInsetLeft: Math.max(0, rowRect.left - left),
+              font: {
+                family: rowStyle.fontFamily,
+                size: rowStyle.fontSize,
+                weight: rowStyle.fontWeight,
+                lineHeight: rowStyle.lineHeight,
+                color: rowStyle.color,
+                letterSpacing: rowStyle.letterSpacing,
+              },
+            }
+          } catch (error) {
+            console.error('[activity-view] measure list box failed', error)
+            return null
+          }
+        }
+
+        const paintOverlay = (host) => {
+          const state = store.snapshot
+          if (pinnedRegion === null) pinnedRegion = measureListBox() || findRegion()
+          const region = pinnedRegion
+          const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
+          const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
+          const width = Math.max(220, Math.min(Math.round(region.width) || 0, Math.max(240, viewportWidth - 32)))
+          const height = Math.max(160, Math.min(Math.round(region.height) || 0, Math.max(200, viewportHeight - 32)))
+          const left = Math.max(0, Math.min(Math.round(region.left) || 0, viewportWidth - width - 8))
+          const top = Math.max(0, Math.min(Math.round(region.top) || 0, viewportHeight - height - 8))
+          host.style.left = `${left}px`
+          host.style.top = `${top}px`
+          host.style.width = `${width}px`
+          host.style.height = `${height}px`
+          host.style.background =
+            region.background !== '' && region.background !== undefined
+              ? region.background
+              : 'var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1, Canvas))'
+          const font = region.font
+          if (font !== undefined) {
+            host.style.fontFamily = font.family
+            host.style.fontSize = font.size
+            host.style.fontWeight = font.weight
+            host.style.lineHeight = font.lineHeight
+            host.style.color = font.color
+            if (font.letterSpacing !== '' && font.letterSpacing !== 'normal') {
+              host.style.letterSpacing = font.letterSpacing
+            }
+          }
+          host.textContent = ''
+
+          const inset = Math.max(0, Math.round(region.rowInsetLeft === undefined ? 6 : region.rowInsetLeft))
+          const rowHeight = Math.max(22, Math.round(region.rowHeight === undefined ? 30 : region.rowHeight))
+          const body = document.createElement('div')
+          body.style.cssText = `flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:4px ${inset}px 12px;font:inherit;`
+          host.appendChild(body)
+
+          const message = (text) => {
+            const node = document.createElement('div')
+            node.textContent = text
+            node.style.cssText =
+              'padding:12px 4px;font-size:.95em;line-height:1.5;opacity:.7;'
+            return node
+          }
+
+          const items = sortEntries(Array.isArray(state.items) ? state.items : [])
+          if (state.status === 'unavailable') {
+            body.appendChild(message(translate('unavailable')))
+            return
+          }
+          if (items.length === 0) {
+            const key = state.status === 'error' ? 'failed' : state.status === 'ready' ? 'empty' : 'loading'
+            body.appendChild(message(translate(key)))
+            return
+          }
+
+          const groups = []
+          for (const entry of items) {
+            const label = dayLabel(entry.time)
+            let group = groups.find((candidate) => candidate.label === label)
+            if (group === undefined) {
+              group = { label, items: [] }
+              groups.push(group)
+            }
+            group.items.push(entry)
+          }
+
+          for (const group of groups) {
+            const heading = document.createElement('div')
+            heading.textContent = group.label
+            heading.style.cssText =
+              'padding:8px 2px 2px;font-size:.85em;font-weight:500;color:inherit;opacity:.6;'
+            body.appendChild(heading)
+
+            for (const entry of group.items) {
+              const row = document.createElement('button')
+              row.type = 'button'
+              row.setAttribute('data-av-session', entry.id)
+              row.title = entry.title
+              row.style.cssText =
+                `display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;height:${rowHeight}px;padding:0 6px;margin:0;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;`
+              row.addEventListener('mouseenter', () => {
+                row.style.background = 'var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.12))'
+              })
+              row.addEventListener('mouseleave', () => {
+                row.style.background = 'transparent'
+              })
+
+              const dot = document.createElement('span')
+              dot.style.cssText = `flex:none;width:6px;height:6px;border-radius:50%;background:${
+                entry.running === true ? 'var(--dsw-alias-brand-primary, #4f6bf5)' : 'transparent'
+              };`
+              row.appendChild(dot)
+
+              const text = document.createElement('span')
+              text.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;'
+              const title = document.createElement('span')
+              title.textContent = entry.title
+              title.style.cssText =
+                'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+              text.appendChild(title)
+              if (entry.workspace !== '') {
+                const workspace = document.createElement('span')
+                workspace.textContent = entry.workspace
+                workspace.style.cssText =
+                  'font-size:.85em;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.7;'
+                text.appendChild(workspace)
+              }
+              row.appendChild(text)
+
+              const when = document.createElement('span')
+              when.textContent = formatWhen(entry.time)
+              when.style.cssText =
+                'flex:none;font-size:.85em;opacity:.55;'
+              row.appendChild(when)
+
+              body.appendChild(row)
+            }
+          }
+        }
+
+        /** 可见的失败提示：宁可打扰一次，也不要静默什么都不发生。 */
+        const toastFailure = (error) => {
+          try {
+            const box = document.createElement('div')
+            box.textContent = `[activity-view] ${error instanceof Error ? error.message : String(error)}`
+            box.style.cssText = [
+              'position:fixed',
+              'left:12px',
+              'bottom:12px',
+              'z-index:2147483647',
+              'max-width:70vw',
+              'padding:8px 10px',
+              'border-radius:8px',
+              'background:#7f1d1d',
+              'color:#fff',
+              'font:12px/1.4 ui-sans-serif,system-ui,sans-serif',
+              'white-space:pre-wrap',
+              'box-shadow:0 8px 24px rgba(0,0,0,.3)',
+            ].join(';')
+            document.documentElement.appendChild(box)
+            window.setTimeout(() => box.remove(), 12000)
+          } catch {
+            // 连提示都放不进去时只能留在控制台
+          }
+        }
+
+        const syncOverlay = () => {
+          if (typeof document === 'undefined') return
+          try {
+            paintSync()
+            document.documentElement.setAttribute('data-activity-view', overlayOpen ? 'open' : 'closed')
+          } catch (error) {
+            console.error('[activity-view] overlay failed', error)
+            toastFailure(error)
+          }
+        }
+
+        const paintSync = () => {
+          if (!overlayOpen) {
+            pinnedRegion = null
+            if (overlayEl !== null) {
+              overlayEl.remove()
+              overlayEl = null
+            }
+            return
+          }
+          if (overlayEl === null) {
+            const host = document.createElement('div')
+            host.className = 'dshActivityOverlay'
+            host.setAttribute('role', 'region')
+            host.setAttribute('aria-label', translate('iconLabel'))
+            host.style.cssText = [
+              'position:fixed',
+              'z-index:2147483000',
+              'display:flex',
+              'flex-direction:column',
+              'min-height:0',
+              'border-radius:0',
+              'border:0',
+              'box-shadow:none',
+              'font:inherit',
+              'color:var(--dsw-alias-label-primary, inherit)',
+            ].join(';')
+            host.addEventListener(
+              'mousedown',
+              (event) => {
+                const target = event.target instanceof Element ? event.target : null
+                const row = target !== null ? target.closest('[data-av-session]') : null
+                if (row !== null) {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  openSession(row.getAttribute('data-av-session') || '')
+                  return
+                }
+                if (target !== null && target.closest('[data-av-close]') !== null) {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setOverlayOpen(false)
+                }
+              },
+              true,
+            )
+            overlayEl = host
+            document.documentElement.appendChild(host)
+          }
+          paintOverlay(overlayEl)
+        }
+
+        const setOverlayOpen = (next) => {
+          publishMode(next === true)
+          syncOverlay()
         }
 
         const toggleActivityView = () => {
-          if (workspaceSlotDispose) {
-            workspaceSlotDispose()
-            workspaceSlotDispose = undefined
-            publishMode(false)
-            return
-          }
-          try {
-            const result = ctx.slots.register(
-              { name: 'sidebar.workspaces', id: PANEL_KEY + '-workspaces', priority: 1000 },
-              ActivityWorkspaceList,
-            )
-            workspaceSlotDispose = result
-            publishMode(true)
-          } catch (error) {
-            console.error('[activity-view] workspaces register failed', error)
-            try {
-              const result = ctx.slots.register(
-                { name: 'sidebar.workspaces', key: PANEL_KEY + '-workspaces', priority: 1000 },
-                ActivityWorkspaceList,
-              )
-              workspaceSlotDispose = result
-              publishMode(true)
-            } catch (fallbackError) {
-              console.error('[activity-view] workspaces fallback failed', fallbackError)
-            }
-          }
+          setOverlayOpen(!overlayOpen)
         }
 
         const useLocaleTick = () => {
@@ -570,12 +965,14 @@ button.dshActivityIcon:focus-visible {
           return snapshot
         }
 
-        const ActivityIcon = () => {
+        const ActivityIcon = (props) => {
           useLocaleTick()
           const active = useMode()
           const snapshot = useSnapshot()
           const busy = Array.isArray(snapshot.items) && snapshot.items.some((entry) => entry.running === true)
           const label = translate('iconLabel')
+          const edge =
+            props !== null && typeof props === 'object' && typeof props.size === 'number' ? props.size : 16
           return h(
             'span',
             {
@@ -595,6 +992,7 @@ button.dshActivityIcon:focus-visible {
                   ? 'var(--dsw-alias-label-primary, #1a1a1a)'
                   : 'var(--dsw-alias-label-secondary, #666)',
               },
+              onClick: () => toggleActivityView(),
               onKeyDown: (event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
@@ -604,12 +1002,11 @@ button.dshActivityIcon:focus-visible {
             },
             h(
               'svg',
-              { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', 'aria-hidden': 'true', style: { display: 'block' } },
+              { viewBox: '0 0 24 24', width: edge, height: edge, fill: 'none', 'aria-hidden': 'true', style: { display: 'block' } },
               h('circle', { cx: 12, cy: 12, r: 8.25, stroke: 'currentColor', strokeWidth: 1.6 }),
               h(
                 'g',
                 null,
-                // SMIL so the motion does not depend on an injected @keyframes rule.
                 busy
                   ? h('animateTransform', {
                       attributeName: 'transform',
@@ -668,11 +1065,10 @@ button.dshActivityIcon:focus-visible {
         }
 
         /**
-         * Replacement for the sidebar workspace/session browsing region while the activity view is
-         * on: sessions sorted by recency, grouped Today/Yesterday/Earlier, each row showing its
-         * workspace name (Codex style).
+         * The activity view: it replaces the sidebar session/workspace browsing region. Sessions are
+         * sorted by recency, grouped Today/Yesterday/Earlier, each row showing its workspace name.
          */
-        const ActivityWorkspaceList = () => {
+        const ActivityViewPanel = () => {
           useLocaleTick()
           const snapshot = useSnapshot()
 
@@ -683,7 +1079,8 @@ button.dshActivityIcon:focus-visible {
             }
           }, [])
 
-          const items = snapshot.items.slice().sort((left, right) => {
+          const runningOnlyOn = useMode()
+          const all = snapshot.items.slice().sort((left, right) => {
             const a = typeof left.time === 'number' ? left.time : Date.parse(left.time) || 0
             const b = typeof right.time === 'number' ? right.time : Date.parse(right.time) || 0
             // Running sessions first (the "current active" ones), then most recent first.
@@ -692,6 +1089,7 @@ button.dshActivityIcon:focus-visible {
             if (ra !== rb) return rb - ra
             return b - a
           })
+          const items = runningOnlyOn ? all.filter((entry) => entry.running === true) : all
 
 
           let listBody
@@ -816,20 +1214,36 @@ button.dshActivityIcon:focus-visible {
           return h(
             'div',
             {
-              className: 'dshActivityView',
+              className: 'dshActivityView dshActivityPanel',
               style: {
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '10px',
                 boxSizing: 'border-box',
                 height: '100%',
-                padding: '12px 10px 16px',
+                padding: '4px 2px 12px',
                 overflowY: 'auto',
                 overflowX: 'hidden',
                 color: 'var(--dsw-alias-label-primary, #1a1a1a)',
                 fontSize: '13px',
               },
             },
+            h(
+              'div',
+              {
+                className: 'dshActivityPanelTitle',
+                style: {
+                  flex: 'none',
+                  padding: '2px 6px 4px',
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  letterSpacing: '0.02em',
+                  textTransform: 'uppercase',
+                  color: 'var(--dsw-alias-label-primary, #1a1a1a)',
+                },
+              },
+              translate('panelTitle'),
+            ),
             listBody,
           )
         }
@@ -854,27 +1268,6 @@ button.dshActivityIcon:focus-visible {
                 if (id !== '') openSession(id)
                 return
               }
-              let hit = false
-              if (target.closest && typeof target.closest === 'function' && target.closest('.dshActivityIcon')) {
-                hit = true
-              }
-              if (!hit && typeof target.querySelector === 'function') {
-                let node = target
-                while (node && node !== document.body) {
-                  if (typeof node.querySelector === 'function' && node.querySelector('.dshActivityIcon')) {
-                    const labelText = translate('iconLabel')
-                    const text = (node.textContent || '').trim()
-                    if (text.length <= labelText.length + 2 && text.indexOf(labelText) !== -1) hit = true
-                    break
-                  }
-                  node = node.parentElement
-                }
-              }
-              if (hit) {
-                event.preventDefault()
-                event.stopPropagation()
-                toggleActivityView()
-              }
             } catch (suppress) {}
           }
           document.addEventListener('click', onDocClick, true)
@@ -893,22 +1286,82 @@ button.dshActivityIcon:focus-visible {
           }, `activity-view:locale:${localeId}`)
         }
 
+        // 列表变化时刷新覆盖层；窗口尺寸变化时重新定位。
+        ctx.effect(() => store.subscribe(() => syncOverlay()), 'activity-view:overlay-sync')
+        ctx.effect(() => {
+          const reposition = () => {
+            if (!overlayOpen) return
+            pinnedRegion = null
+            syncOverlay()
+          }
+          const onKey = (event) => {
+            if (event.key === 'Escape' && overlayOpen) setOverlayOpen(false)
+            // 兜底入口：插槽内的点击可能被宿主吞掉，快捷键不经过插槽。
+            if (event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && (event.key === 'A' || event.key === 'a')) {
+              event.preventDefault()
+              toggleActivityView()
+            }
+          }
+          /**
+           * 面板列表的按钮由宿主 sidebar 自己绘制（我们的组件未必是事件目标），React 的
+           * onClick 不可靠。这里在捕获阶段按 class / aria-label / 可见文案命中，最后再用
+           * 图标自身的矩形做坐标命中测试，确保无论宿主怎么包，点上去都能被我们接住。
+           */
+          const label = translate('iconLabel')
+          const matchesEntry = (node) => {
+            if (node === null) return false
+            if (node.closest('.dshActivityIcon') !== null) return true
+            if (node.closest(`[aria-label="${label}"]`) !== null) return true
+            let cursor = node
+            for (let depth = 0; depth < 4 && cursor !== null; depth += 1) {
+              const text = (cursor.textContent || '').replace(/\s+/g, ' ').trim()
+              if (text === label) return true
+              cursor = cursor.parentElement
+            }
+            return false
+          }
+          const hitOwnIcon = (event) => {
+            const icon = document.querySelector('.dshActivityIcon')
+            if (icon === null) return false
+            const rect = icon.getBoundingClientRect()
+            if (rect.width <= 0 || rect.height <= 0) return false
+            const pad = 6
+            return (
+              event.clientX >= rect.left - pad &&
+              event.clientX <= rect.right + pad &&
+              event.clientY >= rect.top - pad &&
+              event.clientY <= rect.bottom + pad
+            )
+          }
+          const onClickCapture = (event) => {
+            if (overlayEl !== null && overlayEl.contains(event.target)) return
+            const target = event.target instanceof Element ? event.target : null
+            if (target === null) return
+            if (!matchesEntry(target) && !hitOwnIcon(event)) return
+            event.preventDefault()
+            event.stopPropagation()
+            toggleActivityView()
+          }
+          window.addEventListener('click', onClickCapture, true)
+          window.addEventListener('resize', reposition)
+          window.addEventListener('keydown', onKey)
+          return () => {
+            window.removeEventListener('click', onClickCapture, true)
+            window.removeEventListener('resize', reposition)
+            window.removeEventListener('keydown', onKey)
+            if (overlayEl !== null) {
+              overlayEl.remove()
+              overlayEl = null
+            }
+          }
+        }, 'activity-view:overlay-lifecycle')
+
         ctx.slots.inject('sidebar.panellist', () => {
           return ctx.slots.register(
             { name: 'sidebar.panellist', id: PANEL_KEY, order: 20, label: () => translate('iconLabel') },
             ActivityIcon,
           )
         })
-
-        ctx.effect(
-          () => () => {
-            if (workspaceSlotDispose) {
-              workspaceSlotDispose()
-              workspaceSlotDispose = undefined
-            }
-          },
-          'activity-view:workspaces-cleanup',
-        )
 
         if (timerService !== undefined && typeof timerService.interval === 'function') {
           ctx.effect(() => timerService.interval(() => void load(), POLL_MS), 'activity-view:poll')

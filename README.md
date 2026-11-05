@@ -27,6 +27,6 @@ The repo carries the `dsh-plugin` topic, so it is also picked up by the marketpl
 ### Structure
 
 - `cordis.patch.yml` — Cordis bundle patch: inserts the plugin row.
-- The plugin keeps its icon in `sidebar.panellist` and, on click, registers its own React list into `sidebar.workspaces` with a high priority (`id: activity-view-workspaces`, `priority: 1000`). Clicking again disposes that registration so the native browser returns untouched. Registering **at click time** (rather than at apply time) is what makes the shell accept the occupant.
-- Because the list is a real slot occupant rendered by the sidebar, geometry, font and colours are the shell's own: no measured rectangle, no separate card, no overlay.
+- `sidebar.workspaces` is a `single` slot owned by the shell's own sidebar entry and cannot be taken over (a plugin registration only leaves an inactive occupant), so this plugin paints its own list into that region instead: on click it measures one **real session row** plus its scrolling container, places a fixed panel on the container's padding box, and mirrors that row's height, left inset and computed font/colour. Clicking again (or `Esc`, or `Alt+Shift+A`) removes the panel and the native list is untouched underneath.
+- Because the geometry and typography are sampled from the live native row, the panel lines up with the native column and inherits the theme's font and colours. The panel is mounted on `documentElement`, so React re-renders never wipe it.
 - Duplicate rows are folded twice — ids are normalised (`session-<uuid>` vs `<uuid>`) and de-duplicated, then rows whose normalised title prefix and workspace match are collapsed with a running row winning. Placeholder titles never merge, so genuinely distinct sessions stay visible.
