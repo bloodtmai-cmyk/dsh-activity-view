@@ -1,13 +1,13 @@
 # DSH Activity View
 
-**DSH 活动视图** — 在 DeepSeek Harness 左侧工作区/会话列表的位置显示一个按活跃度排列的活动视图：当前运行中的会话置顶（带动态旋转标记），其余按最近活动时间倒序，每行显示会话标题与所属项目（工作区）名，按今天/昨天/更早分组。点侧栏面板列表里的活动视图图标打开，再点一次（或按 Esc）关闭，关闭后原样露出原生列表。
+**DSH 活动视图** — 在 DeepSeek Harness 左侧工作区/会话列表的位置显示一个按活跃度排列的活动视图：当前运行中的会话置顶（带动态旋转标记），其余按最近活动时间倒序，每行显示会话标题与所属项目（工作区）名，按今天/昨天/更早分组。点侧栏面板列表里的「活动视图」按钮打开（也可按 Alt+Shift+A），再点一次或按 Esc 关闭，关闭后原样露出原生列表。
 
 [English](#english) · [简体中文](#简体中文)
 
 <a id="english"></a>
 ## English
 
-A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Shows a flat, activity-sorted session list (Today/Yesterday/Earlier, workspace name per row, running sessions pinned on top) exactly where the left workspace/session list sits. Click the activity-view icon in the sidebar panel list to open it, click again (or press Esc) to restore the native list:
+A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Shows a flat, activity-sorted session list (Today/Yesterday/Earlier, workspace name per row, running sessions pinned on top) exactly where the left workspace/session list sits. Click the activity-view button in the sidebar panel list to open it (Alt+Shift+A also works), click again or press Esc to restore the native list:
 
 - **Running first**: sessions with active work are pinned at the top with an animated spinner.
 - **Project name per row**: each row shows the session title plus its workspace (cwd basename); the workspace span is skipped when it duplicates the title.

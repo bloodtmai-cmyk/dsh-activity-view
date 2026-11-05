@@ -605,13 +605,37 @@ button.dshActivityIcon:focus-visible {
         const paintOverlay = (host) => {
           const state = store.snapshot
           const region = findRegion()
-          host.style.left = `${Math.round(region.left)}px`
-          host.style.top = `${Math.round(region.top)}px`
-          host.style.width = `${Math.round(region.width)}px`
-          host.style.height = `${Math.round(region.height)}px`
+          const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
+          const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
+          const width = Math.max(220, Math.min(Math.round(region.width) || 0, Math.max(240, viewportWidth - 32)))
+          const height = Math.max(160, Math.min(Math.round(region.height) || 0, Math.max(200, viewportHeight - 32)))
+          const left = Math.max(0, Math.min(Math.round(region.left) || 0, viewportWidth - width - 8))
+          const top = Math.max(0, Math.min(Math.round(region.top) || 0, viewportHeight - height - 8))
+          host.style.left = `${left}px`
+          host.style.top = `${top}px`
+          host.style.width = `${width}px`
+          host.style.height = `${height}px`
           host.style.background =
             region.background !== '' ? region.background : 'var(--dsw-alias-bg-primary, Canvas)'
           host.textContent = ''
+
+          const header = document.createElement('div')
+          header.style.cssText =
+            'flex:none;display:flex;align-items:center;gap:8px;padding:6px 8px 4px;'
+          const title = document.createElement('span')
+          title.textContent = translate('panelTitle')
+          title.style.cssText =
+            'flex:1;min-width:0;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dsw-alias-label-secondary,#8a8a8a);'
+          header.appendChild(title)
+          const close = document.createElement('button')
+          close.type = 'button'
+          close.setAttribute('data-av-close', 'true')
+          close.setAttribute('aria-label', translate('iconLabel'))
+          close.textContent = '×'
+          close.style.cssText =
+            'flex:none;width:20px;height:20px;padding:0;border:0;border-radius:5px;background:transparent;color:inherit;font:14px/1 ui-sans-serif,system-ui,sans-serif;cursor:pointer;opacity:.7;'
+          header.appendChild(close)
+          host.appendChild(header)
 
           const body = document.createElement('div')
           body.style.cssText =
@@ -696,8 +720,44 @@ button.dshActivityIcon:focus-visible {
           }
         }
 
+        /** 可见的失败提示：宁可打扰一次，也不要静默什么都不发生。 */
+        const toastFailure = (error) => {
+          try {
+            const box = document.createElement('div')
+            box.textContent = `[activity-view] ${error instanceof Error ? error.message : String(error)}`
+            box.style.cssText = [
+              'position:fixed',
+              'left:12px',
+              'bottom:12px',
+              'z-index:2147483647',
+              'max-width:70vw',
+              'padding:8px 10px',
+              'border-radius:8px',
+              'background:#7f1d1d',
+              'color:#fff',
+              'font:12px/1.4 ui-sans-serif,system-ui,sans-serif',
+              'white-space:pre-wrap',
+              'box-shadow:0 8px 24px rgba(0,0,0,.3)',
+            ].join(';')
+            document.documentElement.appendChild(box)
+            window.setTimeout(() => box.remove(), 12000)
+          } catch {
+            // 连提示都放不进去时只能留在控制台
+          }
+        }
+
         const syncOverlay = () => {
           if (typeof document === 'undefined') return
+          try {
+            paintSync()
+            document.documentElement.setAttribute('data-activity-view', overlayOpen ? 'open' : 'closed')
+          } catch (error) {
+            console.error('[activity-view] overlay failed', error)
+            toastFailure(error)
+          }
+        }
+
+        const paintSync = () => {
           if (!overlayOpen) {
             if (overlayEl !== null) {
               overlayEl.remove()
@@ -720,7 +780,7 @@ button.dshActivityIcon:focus-visible {
               'box-shadow:0 12px 32px rgba(0, 0, 0, 0.14)',
             ].join(';')
             host.addEventListener(
-              'click',
+              'mousedown',
               (event) => {
                 const target = event.target instanceof Element ? event.target : null
                 const row = target !== null ? target.closest('[data-av-session]') : null
@@ -728,12 +788,18 @@ button.dshActivityIcon:focus-visible {
                   event.preventDefault()
                   event.stopPropagation()
                   openSession(row.getAttribute('data-av-session') || '')
+                  return
+                }
+                if (target !== null && target.closest('[data-av-close]') !== null) {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setOverlayOpen(false)
                 }
               },
               true,
             )
             overlayEl = host
-            document.body.appendChild(host)
+            document.documentElement.appendChild(host)
           }
           paintOverlay(overlayEl)
         }
@@ -1098,11 +1164,58 @@ button.dshActivityIcon:focus-visible {
           }
           const onKey = (event) => {
             if (event.key === 'Escape' && overlayOpen) setOverlayOpen(false)
+            // 兜底入口：插槽内的点击可能被宿主吞掉，快捷键不经过插槽。
+            if (event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && (event.key === 'A' || event.key === 'a')) {
+              event.preventDefault()
+              toggleActivityView()
+            }
           }
+          /**
+           * 面板列表的按钮由宿主 sidebar 自己绘制（我们的组件未必是事件目标），React 的
+           * onClick 不可靠。这里在捕获阶段按 class / aria-label / 可见文案命中，最后再用
+           * 图标自身的矩形做坐标命中测试，确保无论宿主怎么包，点上去都能被我们接住。
+           */
+          const label = translate('iconLabel')
+          const matchesEntry = (node) => {
+            if (node === null) return false
+            if (node.closest('.dshActivityIcon') !== null) return true
+            if (node.closest(`[aria-label="${label}"]`) !== null) return true
+            let cursor = node
+            for (let depth = 0; depth < 4 && cursor !== null; depth += 1) {
+              const text = (cursor.textContent || '').replace(/\s+/g, ' ').trim()
+              if (text === label) return true
+              cursor = cursor.parentElement
+            }
+            return false
+          }
+          const hitOwnIcon = (event) => {
+            const icon = document.querySelector('.dshActivityIcon')
+            if (icon === null) return false
+            const rect = icon.getBoundingClientRect()
+            if (rect.width <= 0 || rect.height <= 0) return false
+            const pad = 6
+            return (
+              event.clientX >= rect.left - pad &&
+              event.clientX <= rect.right + pad &&
+              event.clientY >= rect.top - pad &&
+              event.clientY <= rect.bottom + pad
+            )
+          }
+          const onClickCapture = (event) => {
+            if (overlayEl !== null && overlayEl.contains(event.target)) return
+            const target = event.target instanceof Element ? event.target : null
+            if (target === null) return
+            if (!matchesEntry(target) && !hitOwnIcon(event)) return
+            event.preventDefault()
+            event.stopPropagation()
+            toggleActivityView()
+          }
+          window.addEventListener('click', onClickCapture, true)
           window.addEventListener('resize', reposition)
           window.addEventListener('scroll', reposition, true)
           window.addEventListener('keydown', onKey)
           return () => {
+            window.removeEventListener('click', onClickCapture, true)
             window.removeEventListener('resize', reposition)
             window.removeEventListener('scroll', reposition, true)
             window.removeEventListener('keydown', onKey)
