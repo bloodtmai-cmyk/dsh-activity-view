@@ -493,61 +493,6 @@ button.dshActivityIcon:focus-visible {
           }
         }
 
-        /** Module-level toggle state so the icon and the swapped region stay in sync. */
-        let activityActive = false
-        let workspaceSlotDispose
-        const modeListeners = new Set()
-        const publishMode = (next) => {
-          activityActive = next
-          for (const listener of modeListeners) {
-            try {
-              listener(next)
-            } catch (error) {
-              console.error('[activity-view] mode listener failed', error)
-            }
-          }
-        }
-        const useMode = () => {
-          const [, setTick] = React.useState(0)
-          React.useEffect(() => {
-            const listener = () => setTick((tick) => tick + 1)
-            modeListeners.add(listener)
-            return () => {
-              modeListeners.delete(listener)
-            }
-          }, [])
-          return activityActive
-        }
-
-        const toggleActivityView = () => {
-          if (workspaceSlotDispose) {
-            workspaceSlotDispose()
-            workspaceSlotDispose = undefined
-            publishMode(false)
-            return
-          }
-          try {
-            const result = ctx.slots.register(
-              { name: 'sidebar.workspaces', id: PANEL_KEY + '-workspaces', priority: 1000 },
-              ActivityWorkspaceList,
-            )
-            workspaceSlotDispose = result
-            publishMode(true)
-          } catch (error) {
-            console.error('[activity-view] workspaces register failed', error)
-            try {
-              const result = ctx.slots.register(
-                { name: 'sidebar.workspaces', key: PANEL_KEY + '-workspaces', priority: 1000 },
-                ActivityWorkspaceList,
-              )
-              workspaceSlotDispose = result
-              publishMode(true)
-            } catch (fallbackError) {
-              console.error('[activity-view] workspaces fallback failed', fallbackError)
-            }
-          }
-        }
-
         const useLocaleTick = () => {
           const [, setTick] = React.useState(0)
           React.useEffect(() => {
@@ -570,10 +515,11 @@ button.dshActivityIcon:focus-visible {
           return snapshot
         }
 
-        const ActivityIcon = () => {
+        const ActivityIcon = (props) => {
           useLocaleTick()
-          const active = useMode()
           const snapshot = useSnapshot()
+          const active = props !== null && typeof props === 'object' && props.active === true
+          const edge = props !== null && typeof props === 'object' && typeof props.size === 'number' ? props.size : 16
           const busy = Array.isArray(snapshot.items) && snapshot.items.some((entry) => entry.running === true)
           const label = translate('iconLabel')
           return h(
@@ -595,16 +541,10 @@ button.dshActivityIcon:focus-visible {
                   ? 'var(--dsw-alias-label-primary, #1a1a1a)'
                   : 'var(--dsw-alias-label-secondary, #666)',
               },
-              onKeyDown: (event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  toggleActivityView()
-                }
-              },
             },
             h(
               'svg',
-              { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', 'aria-hidden': 'true', style: { display: 'block' } },
+              { viewBox: '0 0 24 24', width: edge, height: edge, fill: 'none', 'aria-hidden': 'true', style: { display: 'block' } },
               h('circle', { cx: 12, cy: 12, r: 8.25, stroke: 'currentColor', strokeWidth: 1.6 }),
               h(
                 'g',
@@ -668,11 +608,11 @@ button.dshActivityIcon:focus-visible {
         }
 
         /**
-         * Replacement for the sidebar workspace/session browsing region while the activity view is
-         * on: sessions sorted by recency, grouped Today/Yesterday/Earlier, each row showing its
-         * workspace name (Codex style).
+         * The activity view itself, rendered in the main column when the sidebar icon selects
+         * `PANEL_KEY`: sessions sorted by recency, grouped Today/Yesterday/Earlier, each row showing
+         * its workspace name (Codex style).
          */
-        const ActivityWorkspaceList = () => {
+        const ActivityViewPanel = () => {
           useLocaleTick()
           const snapshot = useSnapshot()
 
@@ -816,20 +756,33 @@ button.dshActivityIcon:focus-visible {
           return h(
             'div',
             {
-              className: 'dshActivityView',
+              className: 'dshActivityView dshActivityPanel',
               style: {
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '10px',
                 boxSizing: 'border-box',
                 height: '100%',
-                padding: '12px 10px 16px',
+                padding: '16px 22px',
                 overflowY: 'auto',
                 overflowX: 'hidden',
                 color: 'var(--dsw-alias-label-primary, #1a1a1a)',
                 fontSize: '13px',
               },
             },
+            h(
+              'div',
+              {
+                className: 'dshActivityPanelTitle',
+                style: {
+                  flex: 'none',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  color: 'var(--dsw-alias-label-primary, #1a1a1a)',
+                },
+              },
+              translate('panelTitle'),
+            ),
             listBody,
           )
         }
@@ -853,27 +806,6 @@ button.dshActivityIcon:focus-visible {
                 const id = row.getAttribute('data-av-session') || ''
                 if (id !== '') openSession(id)
                 return
-              }
-              let hit = false
-              if (target.closest && typeof target.closest === 'function' && target.closest('.dshActivityIcon')) {
-                hit = true
-              }
-              if (!hit && typeof target.querySelector === 'function') {
-                let node = target
-                while (node && node !== document.body) {
-                  if (typeof node.querySelector === 'function' && node.querySelector('.dshActivityIcon')) {
-                    const labelText = translate('iconLabel')
-                    const text = (node.textContent || '').trim()
-                    if (text.length <= labelText.length + 2 && text.indexOf(labelText) !== -1) hit = true
-                    break
-                  }
-                  node = node.parentElement
-                }
-              }
-              if (hit) {
-                event.preventDefault()
-                event.stopPropagation()
-                toggleActivityView()
               }
             } catch (suppress) {}
           }
@@ -900,15 +832,11 @@ button.dshActivityIcon:focus-visible {
           )
         })
 
-        ctx.effect(
-          () => () => {
-            if (workspaceSlotDispose) {
-              workspaceSlotDispose()
-              workspaceSlotDispose = undefined
-            }
-          },
-          'activity-view:workspaces-cleanup',
-        )
+        // 侧栏图标选中后，shell 会以该 id 作为 key 在主列渲染 `main` 槽；这里注册对应的面板，
+        // 于是「点图标 → 主列显示活动视图」由 shell 自身的选中逻辑完成，不再和侧栏列表叠加。
+        ctx.slots.inject('main', () => {
+          return ctx.slots.register({ name: 'main', key: PANEL_KEY }, ActivityViewPanel)
+        })
 
         if (timerService !== undefined && typeof timerService.interval === 'function') {
           ctx.effect(() => timerService.interval(() => void load(), POLL_MS), 'activity-view:poll')
