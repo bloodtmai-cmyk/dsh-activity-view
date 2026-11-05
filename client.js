@@ -748,9 +748,65 @@ button.dshActivityIcon:focus-visible {
           }
         }
 
+        /**
+         * 找**真正在滚动的那个列表容器**：scrollHeight 明显大于 clientHeight，且含有成排的行。
+         * 它的边框盒就是原生列表的可视区，用它当面板矩形，下边界天然等于原生列表下边界，
+         * 不会再盖住侧栏底部的其它区块。
+         */
+        const findListScroller = () => {
+          try {
+            const rowLike = (rect) => rect.height >= 18 && rect.height <= 60 && rect.width >= 80
+            const countRows = (element) => {
+              let rows = 0
+              for (const child of element.children) {
+                const rect = child.getBoundingClientRect()
+                if (rowLike(rect)) rows += 1
+                else if (child.children.length > 0) {
+                  for (const grand of child.children) {
+                    if (rowLike(grand.getBoundingClientRect())) rows += 1
+                  }
+                }
+              }
+              return rows
+            }
+            const width = typeof window === 'undefined' ? 1024 : window.innerWidth
+            const height = typeof window === 'undefined' ? 768 : window.innerHeight
+            let best = null
+            for (const element of document.querySelectorAll('*')) {
+              if (overlayEl !== null && (element === overlayEl || element.contains(overlayEl))) continue
+              if (element === document.body || element === document.documentElement) continue
+              const rect = element.getBoundingClientRect()
+              if (rect.width < 150 || rect.width > 720) continue
+              if (rect.height < 200 || rect.height > height * 1.2) continue
+              if (rect.left < 0 || rect.left > 48) continue
+              const overflowY = element.scrollHeight - element.clientHeight
+              if (overflowY < 20) continue
+              if (countRows(element) < 3) continue
+              const area = rect.width * rect.height
+              if (best === null || area < best.area) best = { element, rect, area }
+            }
+            if (best === null) return null
+            const style = window.getComputedStyle(best.element)
+            const num = (value) => Number.parseFloat(value) || 0
+            const left = best.rect.left + num(style.borderLeftWidth)
+            const top = best.rect.top + num(style.borderTopWidth)
+            const width2 = best.rect.width - num(style.borderLeftWidth) - num(style.borderRightWidth)
+            const height2 = Math.min(
+              best.rect.height - num(style.borderTopWidth) - num(style.borderBottomWidth),
+              height - top - 4,
+            )
+            let fill = style.getPropertyValue('--dsw-specific-sidebar-fill').trim()
+            if (fill === '') fill = window.getComputedStyle(document.body).getPropertyValue('--dsw-specific-sidebar-fill').trim()
+            return { source: 'scroller', element: best.element, left, top, width: width2, height: height2, background: fill }
+          } catch (error) {
+            console.error('[activity-view] find scroller failed', error)
+            return null
+          }
+        }
+
         const paintOverlay = (host) => {
           const state = store.snapshot
-          if (pinnedRegion === null) pinnedRegion = findListBox() || findRegion()
+          if (pinnedRegion === null) pinnedRegion = findListScroller() || findListBox() || findRegion()
           const region = pinnedRegion
           const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
           const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
@@ -763,12 +819,11 @@ button.dshActivityIcon:focus-visible {
           host.style.width = `${width}px`
           host.style.height = `${height}px`
           // 底色只认侧栏专用填充色：采样的祖先色会把 body 的底色带进来，正是"白框"的来源。
-          let fill = ''
-          if (region.element !== undefined && region.element !== null) {
-            fill = window.getComputedStyle(region.element).getPropertyValue('--dsw-specific-sidebar-fill').trim()
+          let fill = typeof region.background === 'string' ? region.background : ''
+          if (fill === '') {
+            fill = window.getComputedStyle(document.body).getPropertyValue('--dsw-specific-sidebar-fill').trim()
           }
-          host.style.background =
-            fill !== '' ? fill : region.background !== '' && region.background !== undefined ? region.background : 'transparent'
+          host.style.background = fill !== '' ? fill : '#f9fafb'
           host.style.color = 'var(--dsw-alias-label-primary, inherit)'
           host.textContent = ''
 
@@ -776,6 +831,12 @@ button.dshActivityIcon:focus-visible {
           const view = document.createElement('div')
           view.className = 'dshActivityView'
           view.style.height = '100%'
+          view.style.overflowY = 'auto'
+          view.style.overflowX = 'hidden'
+          view.style.overscrollBehavior = 'contain'
+          // 原生行盒相对列表容器内缩 4px（实测 x=4 的容器里行从 x=8 开始），
+          // 这里用同样的内缩，行的左右边缘才能和原生对齐。
+          view.style.padding = '4px 4px 12px'
           host.appendChild(view)
 
           const message = (text) => {
@@ -955,6 +1016,7 @@ button.dshActivityIcon:focus-visible {
               'display:flex',
               'flex-direction:column',
               'min-height:0',
+              'overflow:hidden',
               'border-radius:0',
               'border:0',
               'box-shadow:none',
