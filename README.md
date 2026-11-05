@@ -1,13 +1,13 @@
 # DSH Activity View
 
-**DSH 活动视图** — 在 DeepSeek Harness 侧栏面板列表新增一个活动视图图标，点选后在主列展示按活跃度排列的会话列表：当前运行中的会话置顶（带动态旋转标记），其余按最近活动时间倒序，每行显示会话标题与所属项目（工作区）名。
+**DSH 活动视图** — 把 DeepSeek Harness 左侧工作区/会话列表替换为按活跃度排列的活动视图：当前运行中的会话置顶（带动态旋转标记），其余按最近活动时间倒序，每行显示会话标题与所属项目（工作区）名。
 
 [English](#english) · [简体中文](#简体中文)
 
 <a id="english"></a>
 ## English
 
-A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Click the activity-view icon in the sidebar panel list to open, in the main column, a flat session list sorted by activity:
+A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Replaces the sidebar workspace/session list with a flat list sorted by activity:
 
 - **Running first**: sessions with active work are pinned at the top with an animated spinner.
 - **Project name per row**: each row shows the session title plus its workspace (cwd basename); the workspace span is skipped when it duplicates the title.
@@ -26,7 +26,7 @@ The repo carries the `dsh-plugin` topic, so it is also picked up by the marketpl
 
 ### Structure
 
-- `cordis.patch.yml` — Cordis bundle patch: inserts the sidebar panel-list icon; the icon's panel id is answered by the plugin's `main` panel registration.
+- `cordis.patch.yml` — Cordis bundle patch: inserts the plugin row; the client module replaces the `sidebar.workspaces` occupant.
 - `client.js` — the entire client half: data loading, sorting, rendering, and document-level click capture (host slots swallow React `onClick`).
 - `index.js` — host half (no host-side work needed).
 - `locale/{en,zh}.json` — localized meta and labels.
@@ -35,7 +35,7 @@ The repo carries the `dsh-plugin` topic, so it is also picked up by the marketpl
 <a id="简体中文"></a>
 ## 简体中文
 
-面向 DeepSeek Harness 的社区 UI 插件（包名发布前请自行改名）。点击侧栏面板列表上的活动视图图标，即可在主列打开按活跃度排序的会话扁平列表：
+面向 DeepSeek Harness 的社区 UI 插件（包名发布前请自行改名）。左侧工作区/会话列表被替换为按活跃度排序的会话扁平列表：
 
 - **活动会话置顶**：正在运行的会话排在最前面，带旋转动画标记。
 - **每行带项目名**：每行显示会话标题与所属项目（工作区目录名）；与标题重复时自动省略。

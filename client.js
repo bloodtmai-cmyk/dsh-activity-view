@@ -515,65 +515,6 @@ button.dshActivityIcon:focus-visible {
           return snapshot
         }
 
-        const ActivityIcon = (props) => {
-          useLocaleTick()
-          const snapshot = useSnapshot()
-          const active = props !== null && typeof props === 'object' && props.active === true
-          const edge = props !== null && typeof props === 'object' && typeof props.size === 'number' ? props.size : 16
-          const busy = Array.isArray(snapshot.items) && snapshot.items.some((entry) => entry.running === true)
-          const label = translate('iconLabel')
-          return h(
-            'span',
-            {
-              className: active ? 'dshActivityIcon dshActivityIconActive' : 'dshActivityIcon',
-              role: 'button',
-              tabIndex: 0,
-              'aria-label': label,
-              'aria-pressed': active ? 'true' : 'false',
-              title: label,
-              style: {
-                pointerEvents: 'auto',
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                lineHeight: 0,
-                color: active
-                  ? 'var(--dsw-alias-label-primary, #1a1a1a)'
-                  : 'var(--dsw-alias-label-secondary, #666)',
-              },
-            },
-            h(
-              'svg',
-              { viewBox: '0 0 24 24', width: edge, height: edge, fill: 'none', 'aria-hidden': 'true', style: { display: 'block' } },
-              h('circle', { cx: 12, cy: 12, r: 8.25, stroke: 'currentColor', strokeWidth: 1.6 }),
-              h(
-                'g',
-                null,
-                // SMIL so the motion does not depend on an injected @keyframes rule.
-                busy
-                  ? h('animateTransform', {
-                      attributeName: 'transform',
-                      attributeType: 'XML',
-                      type: 'rotate',
-                      from: '0 12 12',
-                      to: '360 12 12',
-                      dur: '1.6s',
-                      repeatCount: 'indefinite',
-                    })
-                  : null,
-                h('path', {
-                  d: 'M12 7.6V12.1L15 13.9',
-                  stroke: 'currentColor',
-                  strokeWidth: 1.6,
-                  strokeLinecap: 'round',
-                  strokeLinejoin: 'round',
-                }),
-              ),
-              h('circle', { cx: 17.6, cy: 7.2, r: 2.4, fill: 'currentColor', opacity: busy ? 1 : 0.55 }),
-            ),
-          )
-        }
-
         /** Group entries into today / yesterday / earlier buckets, preserving recency order. */
         const groupByDay = (items) => {
           const startOfToday = new Date()
@@ -608,9 +549,8 @@ button.dshActivityIcon:focus-visible {
         }
 
         /**
-         * The activity view itself, rendered in the main column when the sidebar icon selects
-         * `PANEL_KEY`: sessions sorted by recency, grouped Today/Yesterday/Earlier, each row showing
-         * its workspace name (Codex style).
+         * The activity view: it replaces the sidebar session/workspace browsing region. Sessions are
+         * sorted by recency, grouped Today/Yesterday/Earlier, each row showing its workspace name.
          */
         const ActivityViewPanel = () => {
           useLocaleTick()
@@ -763,7 +703,7 @@ button.dshActivityIcon:focus-visible {
                 gap: '10px',
                 boxSizing: 'border-box',
                 height: '100%',
-                padding: '16px 22px',
+                padding: '4px 2px 12px',
                 overflowY: 'auto',
                 overflowX: 'hidden',
                 color: 'var(--dsw-alias-label-primary, #1a1a1a)',
@@ -776,8 +716,11 @@ button.dshActivityIcon:focus-visible {
                 className: 'dshActivityPanelTitle',
                 style: {
                   flex: 'none',
-                  fontSize: '13px',
-                  fontWeight: 600,
+                  padding: '2px 6px 4px',
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  letterSpacing: '0.02em',
+                  textTransform: 'uppercase',
                   color: 'var(--dsw-alias-label-primary, #1a1a1a)',
                 },
               },
@@ -825,17 +768,11 @@ button.dshActivityIcon:focus-visible {
           }, `activity-view:locale:${localeId}`)
         }
 
-        ctx.slots.inject('sidebar.panellist', () => {
-          return ctx.slots.register(
-            { name: 'sidebar.panellist', id: PANEL_KEY, order: 20, label: () => translate('iconLabel') },
-            ActivityIcon,
-          )
-        })
-
-        // 侧栏图标选中后，shell 会以该 id 作为 key 在主列渲染 `main` 槽；这里注册对应的面板，
-        // 于是「点图标 → 主列显示活动视图」由 shell 自身的选中逻辑完成，不再和侧栏列表叠加。
-        ctx.slots.inject('main', () => {
-          return ctx.slots.register({ name: 'main', key: PANEL_KEY }, ActivityViewPanel)
+        // 侧栏左侧工作区/会话列表整体换成活动视图。single 槽的替换必须走 inject：
+        // inject 声明「这个座位存在」，register 覆盖它的占用者；直接 register 只会多出一个占位，
+        // 原生列表照旧渲染，于是就出现了两份列表叠在一起。
+        ctx.slots.inject('sidebar.workspaces', () => {
+          return ctx.slots.register({ name: 'sidebar.workspaces' }, ActivityViewPanel)
         })
 
         if (timerService !== undefined && typeof timerService.interval === 'function') {
