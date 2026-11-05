@@ -1,13 +1,13 @@
 # DSH Activity View
 
-**DSH 活动视图** — 在 DeepSeek Harness 侧栏面板列表新增一个活动视图图标，点一下把左侧工作区/会话列表换成按活跃度排列的扁平列表，再点一下换回原生列表：当前运行中的会话置顶（带动态旋转标记），其余按最近活动时间倒序，每行显示会话标题与所属项目（工作区）名。
+**DSH 活动视图** — 把 DeepSeek Harness 左侧工作区/会话列表替换为按活跃度排列的活动视图（分组：今天/昨天/更早，行内显示所属工作区，运行中的会话置顶）；侧栏面板列表同时保留活动视图图标，点它可切换「只看运行中」过滤：当前运行中的会话置顶（带动态旋转标记），其余按最近活动时间倒序，每行显示会话标题与所属项目（工作区）名。
 
 [English](#english) · [简体中文](#简体中文)
 
 <a id="english"></a>
 ## English
 
-A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Click the activity-view icon in the sidebar panel list to swap the left workspace/session list for a flat list sorted by activity; click again to restore the native list:
+A community UI plugin for DeepSeek Harness, packaged as `dsh-activity-view`. Replaces the left workspace/session list with a flat, activity-sorted session list (Today/Yesterday/Earlier, workspace name per row, running sessions pinned on top). The activity-view icon in the sidebar panel list toggles a running-only filter:
 
 - **Running first**: sessions with active work are pinned at the top with an animated spinner.
 - **Project name per row**: each row shows the session title plus its workspace (cwd basename); the workspace span is skipped when it duplicates the title.
@@ -26,7 +26,8 @@ The repo carries the `dsh-plugin` topic, so it is also picked up by the marketpl
 
 ### Structure
 
-- `cordis.patch.yml` — Cordis bundle patch: inserts the plugin row; the icon toggles the `sidebar.workspaces` occupant through `ctx.slots.inject`.
+- `cordis.patch.yml` — Cordis bundle patch: inserts the plugin row.
+- `sidebar.workspaces` is a `single` slot: the replacement is decided at plugin apply time, so the client module registers its occupant there (a later, runtime registration only leaves an inactive occupant and changes nothing).
 - `client.js` — the entire client half: data loading, sorting, rendering, and document-level click capture (host slots swallow React `onClick`).
 - `index.js` — host half (no host-side work needed).
 - `locale/{en,zh}.json` — localized meta and labels.

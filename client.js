@@ -493,12 +493,11 @@ button.dshActivityIcon:focus-visible {
           }
         }
 
-        /** 活动视图是否已接管侧栏的工作区/会话列表。 */
-        let activityActive = false
-        let workspaceInject
+        /** 侧栏图标上的「只看运行中」过滤是否开启。 */
+        let runningOnly = false
         const modeListeners = new Set()
         const publishMode = (next) => {
-          activityActive = next
+          runningOnly = next
           for (const listener of modeListeners) {
             try {
               listener(next)
@@ -516,32 +515,16 @@ button.dshActivityIcon:focus-visible {
               modeListeners.delete(listener)
             }
           }, [])
-          return activityActive
+          return runningOnly
         }
 
         /**
-         * 开关活动视图：开＝接管侧栏工作区列表（inject 才能顶掉原生占用者），关＝释放、原生列表回来。
+         * `sidebar.workspaces` 是 single 槽：占用者的替换在插件 apply（座位解析之前）时决定，
+         * 运行期再 register/inject 只会留下一个未激活的占用者，不会改变已挂载的列表，
+         * 所以这里只保留一个运行期真正生效的开关——列表的「只看运行中」过滤。
          */
-        const toggleActivityView = () => {
-          if (workspaceInject) {
-            try {
-              workspaceInject()
-            } catch (error) {
-              console.error('[activity-view] workspaces release failed', error)
-            }
-            workspaceInject = undefined
-            publishMode(false)
-            return
-          }
-          try {
-            const dispose = ctx.slots.inject('sidebar.workspaces', () => {
-              return ctx.slots.register({ name: 'sidebar.workspaces' }, ActivityViewPanel)
-            })
-            workspaceInject = typeof dispose === 'function' ? dispose : undefined
-            publishMode(true)
-          } catch (error) {
-            console.error('[activity-view] workspaces inject failed', error)
-          }
+        const toggleRunningOnly = () => {
+          publishMode(!runningOnly)
         }
 
         const useLocaleTick = () => {
@@ -593,10 +576,11 @@ button.dshActivityIcon:focus-visible {
                   ? 'var(--dsw-alias-label-primary, #1a1a1a)'
                   : 'var(--dsw-alias-label-secondary, #666)',
               },
+              onClick: () => toggleRunningOnly(),
               onKeyDown: (event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
-                  toggleActivityView()
+                  toggleRunningOnly()
                 }
               },
             },
@@ -679,7 +663,8 @@ button.dshActivityIcon:focus-visible {
             }
           }, [])
 
-          const items = snapshot.items.slice().sort((left, right) => {
+          const runningOnlyOn = useMode()
+          const all = snapshot.items.slice().sort((left, right) => {
             const a = typeof left.time === 'number' ? left.time : Date.parse(left.time) || 0
             const b = typeof right.time === 'number' ? right.time : Date.parse(right.time) || 0
             // Running sessions first (the "current active" ones), then most recent first.
@@ -688,6 +673,7 @@ button.dshActivityIcon:focus-visible {
             if (ra !== rb) return rb - ra
             return b - a
           })
+          const items = runningOnlyOn ? all.filter((entry) => entry.running === true) : all
 
 
           let listBody
@@ -884,27 +870,17 @@ button.dshActivityIcon:focus-visible {
           }, `activity-view:locale:${localeId}`)
         }
 
+        // single 槽的替换必须在 apply 期完成：侧栏座位尚未解析时注册，才顶掉原生浏览器。
+        ctx.slots.inject('sidebar.workspaces', () => {
+          return ctx.slots.register({ name: 'sidebar.workspaces' }, ActivityViewPanel)
+        })
+
         ctx.slots.inject('sidebar.panellist', () => {
           return ctx.slots.register(
             { name: 'sidebar.panellist', id: PANEL_KEY, order: 20, label: () => translate('iconLabel') },
             ActivityIcon,
           )
         })
-
-        // 切回原生列表 / 卸载时释放工作区占位。
-        ctx.effect(
-          () => () => {
-            if (workspaceInject) {
-              try {
-                workspaceInject()
-              } catch (error) {
-                console.error('[activity-view] workspaces release failed', error)
-              }
-              workspaceInject = undefined
-            }
-          },
-          'activity-view:workspaces-cleanup',
-        )
 
         if (timerService !== undefined && typeof timerService.interval === 'function') {
           ctx.effect(() => timerService.interval(() => void load(), POLL_MS), 'activity-view:poll')
