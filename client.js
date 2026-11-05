@@ -748,7 +748,7 @@ button.dshActivityIcon:focus-visible {
           const region = pinnedRegion
           const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth
           const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight
-          const width = Math.max(220, Math.min(Math.round(region.width) || 0, Math.max(240, viewportWidth - 32)))
+          const width = Math.max(180, Math.min(Math.round(region.width) || 0, Math.max(240, viewportWidth - 32)))
           const height = Math.max(160, Math.min(Math.round(region.height) || 0, Math.max(200, viewportHeight - 32)))
           const left = Math.max(0, Math.min(Math.round(region.left) || 0, viewportWidth - width - 8))
           const top = Math.max(0, Math.min(Math.round(region.top) || 0, viewportHeight - height - 8))
@@ -756,117 +756,131 @@ button.dshActivityIcon:focus-visible {
           host.style.top = `${top}px`
           host.style.width = `${width}px`
           host.style.height = `${height}px`
-          host.style.background =
-            region.background !== '' && region.background !== undefined
-              ? region.background
-              : 'var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1, Canvas))'
-          const font = region.font
-          if (font !== undefined) {
-            host.style.fontFamily = font.family
-            host.style.fontSize = font.size
-            host.style.fontWeight = font.weight
-            host.style.lineHeight = font.lineHeight
-            host.style.color = font.color
-            if (font.letterSpacing !== '' && font.letterSpacing !== 'normal') {
-              host.style.letterSpacing = font.letterSpacing
-            }
-          }
+          // 底色只认侧栏专用填充色：采样的祖先色会把 body 的底色带进来，正是"白框"的来源。
+          host.style.background = 'var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1, Canvas))'
+          host.style.color = 'var(--dsw-alias-label-primary, inherit)'
           host.textContent = ''
 
-          const inset = Math.max(0, Math.round(region.rowInsetLeft === undefined ? 6 : region.rowInsetLeft))
-          const rowHeight = Math.max(22, Math.round(region.rowHeight === undefined ? 30 : region.rowHeight))
-          const body = document.createElement('div')
-          body.style.cssText = `flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:4px ${inset}px 12px;font:inherit;`
-          host.appendChild(body)
+          // 与第一版完全相同的容器与行结构：dshActivityView / dshActivityGroupTitle / dshActivityWsRow
+          const view = document.createElement('div')
+          view.className = 'dshActivityView'
+          view.style.height = '100%'
+          host.appendChild(view)
 
           const message = (text) => {
             const node = document.createElement('div')
+            node.className = 'dshActivityMessage'
             node.textContent = text
-            node.style.cssText =
-              'padding:12px 4px;font-size:.95em;line-height:1.5;opacity:.7;'
-            return node
+            view.appendChild(node)
           }
 
           const items = sortEntries(Array.isArray(state.items) ? state.items : [])
           if (state.status === 'unavailable') {
-            body.appendChild(message(translate('unavailable')))
+            message(translate('unavailable'))
             return
           }
           if (items.length === 0) {
             const key = state.status === 'error' ? 'failed' : state.status === 'ready' ? 'empty' : 'loading'
-            body.appendChild(message(translate(key)))
+            message(translate(key))
             return
           }
 
-          const groups = []
-          for (const entry of items) {
-            const label = dayLabel(entry.time)
-            let group = groups.find((candidate) => candidate.label === label)
-            if (group === undefined) {
-              group = { label, items: [] }
-              groups.push(group)
-            }
-            group.items.push(entry)
+          const spinner = () => {
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+            svg.setAttribute('class', 'dshActivitySpin')
+            svg.setAttribute('viewBox', '0 0 24 24')
+            svg.setAttribute('width', '12')
+            svg.setAttribute('height', '12')
+            svg.setAttribute('fill', 'none')
+            svg.setAttribute('aria-hidden', 'true')
+            svg.style.cssText = 'flex:none;display:block;'
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+            circle.setAttribute('cx', '12')
+            circle.setAttribute('cy', '12')
+            circle.setAttribute('r', '9')
+            circle.setAttribute('stroke', 'currentColor')
+            circle.setAttribute('stroke-width', '3')
+            circle.setAttribute('stroke-opacity', '0.25')
+            const arc = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+            arc.setAttribute('d', 'M12 3a9 9 0 0 1 9 9')
+            arc.setAttribute('stroke', 'currentColor')
+            arc.setAttribute('stroke-width', '3')
+            arc.setAttribute('stroke-linecap', 'round')
+            const spin = document.createElementNS('http://www.w3.org/2000/svg', 'animateTransform')
+            spin.setAttribute('attributeName', 'transform')
+            spin.setAttribute('attributeType', 'XML')
+            spin.setAttribute('type', 'rotate')
+            spin.setAttribute('from', '0 12 12')
+            spin.setAttribute('to', '360 12 12')
+            spin.setAttribute('dur', '1s')
+            spin.setAttribute('repeatCount', 'indefinite')
+            arc.appendChild(spin)
+            svg.appendChild(circle)
+            svg.appendChild(arc)
+            return svg
           }
 
-          if (region.source === 'fallback') {
-            const note = document.createElement('div')
-            note.textContent = translate('notLocated')
-            note.style.cssText = 'flex:none;padding:4px 6px 6px;font-size:.75em;opacity:.5;'
-            host.appendChild(note)
-          }
-
+          const groups = groupByDay(items)
           for (const group of groups) {
+            const block = document.createElement('div')
+            view.appendChild(block)
+
             const heading = document.createElement('div')
+            heading.className = 'dshActivityGroupTitle'
             heading.textContent = group.label
-            heading.style.cssText =
-              'padding:8px 2px 2px;font-size:.85em;font-weight:500;color:inherit;opacity:.6;'
-            body.appendChild(heading)
+            block.appendChild(heading)
+
+            const list = document.createElement('div')
+            block.appendChild(list)
 
             for (const entry of group.items) {
               const row = document.createElement('button')
               row.type = 'button'
+              row.className = 'dshActivityWsRow'
               row.setAttribute('data-av-session', entry.id)
               row.title = entry.title
               row.style.cssText =
-                `display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;height:${rowHeight}px;padding:0 6px;margin:0;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;`
+                'display:flex;align-items:center;gap:7px;width:100%;box-sizing:border-box;padding:6px 8px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:13px;text-align:left;cursor:pointer;line-height:1.35;'
               row.addEventListener('mouseenter', () => {
-                row.style.background = 'var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.12))'
+                row.style.background = 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.14))'
               })
               row.addEventListener('mouseleave', () => {
                 row.style.background = 'transparent'
               })
 
-              const dot = document.createElement('span')
-              dot.style.cssText = `flex:none;width:6px;height:6px;border-radius:50%;background:${
-                entry.running === true ? 'var(--dsw-alias-brand-primary, #4f6bf5)' : 'transparent'
-              };`
-              row.appendChild(dot)
+              if (entry.running === true) row.appendChild(spinner())
 
-              const text = document.createElement('span')
-              text.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;'
               const title = document.createElement('span')
+              title.className = 'dshActivityWsTitle'
               title.textContent = entry.title
-              title.style.cssText =
-                'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
-              text.appendChild(title)
-              if (entry.workspace !== '') {
+              title.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;'
+              row.appendChild(title)
+
+              if (entry.workspace !== '' && entry.workspace !== entry.title) {
                 const workspace = document.createElement('span')
+                workspace.className = 'dshActivityWsName'
                 workspace.textContent = entry.workspace
                 workspace.style.cssText =
-                  'font-size:.85em;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.7;'
-                text.appendChild(workspace)
+                  'flex:none;max-width:45%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary, #999);font-size:11px;'
+                row.appendChild(workspace)
               }
-              row.appendChild(text)
 
               const when = document.createElement('span')
+              when.className = 'dshActivityTime'
               when.textContent = formatWhen(entry.time)
               when.style.cssText =
-                'flex:none;font-size:.85em;opacity:.55;'
+                'flex:none;margin-left:auto;color:var(--dsw-alias-label-secondary, #999);font-size:11px;'
               row.appendChild(when)
 
-              body.appendChild(row)
+              list.appendChild(row)
             }
+          }
+
+          if (region.source === 'fallback') {
+            const note = document.createElement('div')
+            note.className = 'dshActivityDiagnostic'
+            note.textContent = translate('notLocated')
+            view.appendChild(note)
           }
         }
 
